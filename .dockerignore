@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+target
+logs
+__pycache__
+*.py[cod]
+*.log
+.devmenu_history.json
+.idea
+.vscode
+*.swp
+*~

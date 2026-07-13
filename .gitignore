@@ -1,0 +1,75 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local environment / secrets
+.env
+.env.local
+.env.*.local
+.env.backup
+
+# Log files and runtime artifacts
+*.log
+
+# Old HTML files (moved to web/gui/)
+/index.html
+/index_backup.html
+/web/index.html
+/web/index_backup.html
+!/web/gui/
+logs/
+*.pid
+*.tmp
+
+# Generated files
+*.rmeta
+*.lock
+!/Cargo.lock
+*.sqlite
+*.db
+*.bak
+*.old
+
+# Docker / Compose
+docker-compose.override.yml
+.docker/
+
+# Project-specific helpers
+.devmenu_history.json
+.aider.chat.history.md
+.aider.input.history
+
+# Temporary files from shell and editors
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Ignore backup and swap files
+*~
+*.swp
+*.swo
+
+# Ignore Python virtual envs if any
+venv/
+.virtualenv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Ignore secrets and credentials
+secret*
+credentials*
+
+# Keep this file under version control
+!/.gitignore
+
+# .devmenu histo or env files
+.devmenu_*

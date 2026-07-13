@@ -1,0 +1,131 @@
+{
+  "project": {
+    "name": "code_terroir",
+    "type": "rust",
+    "lang": "fr",
+    "icon": "🧩",
+    "timeout": 600
+  },
+  "menus": {
+    "main": {
+      "title": "Menu Principal",
+      "items": [
+        {
+          "label": "Build Debug",
+          "icon": "🔨",
+          "key": "d",
+          "command": "cargo build"
+        },
+        {
+          "label": "Build Release",
+          "icon": "🚀",
+          "key": "r",
+          "command": "cargo build --release",
+          "env": {
+            "RUSTFLAGS": "-C opt-level=3"
+          }
+        },
+        {
+          "label": "Tests",
+          "icon": "🧪",
+          "key": "t",
+          "command": "cargo test"
+        },
+        {
+          "label": "Admin",
+          "icon": "🧩",
+          "key": "a",
+          "submenu": "admin"
+        },
+        {
+          "label": "Logs",
+          "icon": "📜",
+          "key": "o",
+          "submenu": "logs"
+        },
+        {
+          "label": "Clippy",
+          "icon": "🔍",
+          "key": "l",
+          "command": "cargo clippy"
+        },
+        {
+          "label": "Clean",
+          "icon": "🧹",
+          "key": "c",
+          "command": "cargo clean"
+        },
+        {
+          "label": "Git branches",
+          "icon": "🌿",
+          "key": "g",
+          "submenu": "auto:git"
+        },
+        {
+          "label": "Historique",
+          "icon": "🕘",
+          "key": "h",
+          "action": "history"
+        },
+        {
+          "label": "Quitter",
+          "icon": "🚪",
+          "key": "x",
+          "action": "exit"
+        }
+      ]
+    },
+    "admin": {
+      "title": "Admin",
+      "items": [
+        {
+          "label": "Start services",
+          "icon": "🟢",
+          "key": "s",
+          "command": "./admin.sh start"
+        },
+        {
+          "label": "Stop services",
+          "icon": "🔴",
+          "key": "x",
+          "command": "./admin.sh stop"
+        },
+        {
+          "label": "Status",
+          "icon": "📊",
+          "key": "t",
+          "command": "./admin.sh status"
+        },
+        {
+          "label": "Restart",
+          "icon": "♻️",
+          "key": "r",
+          "command": "./admin.sh restart"
+        }
+      ]
+    },
+    "logs": {
+      "title": "Logs",
+      "items": [
+        {
+          "label": "Voir logs API",
+          "icon": "🧾",
+          "key": "a",
+          "command": "tail -n 50 logs/code-terroir-api.log"
+        },
+        {
+          "label": "Voir logs GUI",
+          "icon": "💻",
+          "key": "g",
+          "command": "tail -n 50 logs/code-terroir-gui.log"
+        },
+        {
+          "label": "Suivre logs en temps réel",
+          "icon": "⏱️",
+          "key": "f",
+          "command": "tail -f logs/code-terroir-api.log logs/code-terroir-gui.log"
+        }
+      ]
+    }
+  }
+}

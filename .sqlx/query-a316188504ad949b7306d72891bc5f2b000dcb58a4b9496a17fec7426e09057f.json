@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            COUNT(*) as total_scans,\n            COUNT(DISTINCT ip_address) as unique_scans,\n            COUNT(CASE WHEN scanned_at::date = CURRENT_DATE THEN 1 END) as scans_today,\n            COUNT(CASE WHEN scanned_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as scans_this_week,\n            COUNT(CASE WHEN scanned_at >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as scans_this_month\n        FROM qr_scans \n        WHERE qr_tag_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_scans",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "unique_scans",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "scans_today",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "scans_this_week",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "scans_this_month",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a316188504ad949b7306d72891bc5f2b000dcb58a4b9496a17fec7426e09057f"
+}
