@@ -80,12 +80,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
     login.or(register).or(refresh)
 }
 
-pub fn require_access_token(
-    state: AppState,
-) -> impl Filter<Extract = (), Error = Rejection> + Clone {
-    authenticated(state).map(|_| ()).untuple_one()
-}
-
 pub fn authenticated(
     state: AppState,
 ) -> impl Filter<Extract = (AuthenticatedUser,), Error = Rejection> + Clone {

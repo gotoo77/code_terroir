@@ -29,7 +29,6 @@ pub struct AppState {
 // Routes principales
 pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     let auth_routes = auth::routes(state.clone());
-    let access_token = auth::require_access_token(state.clone());
     let product_routes = products::routes(state.clone());
     let producer_routes = producers::routes(state.clone());
     let supplier_routes = suppliers::routes(state.clone());
@@ -53,9 +52,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         // .or(qr_routes)  // Obsolète
         .or(qr_tag_routes);
 
-    auth_routes
-        .or(public_routes)
-        .or(access_token.and(private_routes))
+    auth_routes.or(public_routes).or(private_routes)
 }
 
 // Gestionnaire d'erreurs global
