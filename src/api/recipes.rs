@@ -12,7 +12,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("recipes"));
 
     let list_recipes = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -20,7 +19,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_recipes_handler);
 
     let get_recipe = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -29,7 +27,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(get_recipe_handler);
 
     let create_recipe = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())

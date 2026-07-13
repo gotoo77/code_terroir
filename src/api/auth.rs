@@ -53,7 +53,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("auth"));
 
     let login = api_prefix
-        .clone()
         .and(warp::path("login"))
         .and(warp::post())
         .and(warp::path::end())
@@ -62,7 +61,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(login_handler);
 
     let register = api_prefix
-        .clone()
         .and(warp::path("register"))
         .and(warp::post())
         .and(warp::path::end())

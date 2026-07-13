@@ -12,7 +12,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("suppliers"));
 
     let list_suppliers = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -20,7 +19,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_suppliers_handler);
 
     let get_supplier = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -29,7 +27,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(get_supplier_handler);
 
     let create_supplier = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
@@ -170,14 +167,14 @@ async fn create_supplier_handler(
         RETURNING *
         "#,
     )
-    .bind(&supplier_id)
-    .bind(&producer_id)
+    .bind(supplier_id)
+    .bind(producer_id)
     .bind(&create_request.name)
     .bind(&create_request.contact_email)
     .bind(&create_request.contact_phone)
     .bind(&create_request.address)
     .bind(&create_request.certifications)
-    .bind(&create_request.documents.unwrap_or_default())
+    .bind(create_request.documents.unwrap_or_default())
     .fetch_one(&state.db.pool)
     .await
     {
@@ -240,7 +237,7 @@ async fn update_supplier_handler(
         RETURNING *
         "#,
     )
-    .bind(&supplier_id)
+    .bind(supplier_id)
     .bind(&update_request.name)
     .bind(&update_request.contact_email)
     .bind(&update_request.contact_phone)

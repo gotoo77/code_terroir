@@ -83,7 +83,7 @@ Références :
 ### Lot 0 — Vérité du produit et garde-fous
 
 - Corriger la documentation pour ne décrire que les fonctions réellement disponibles.
-- Ajouter une CI : formatage, tests, Clippy avec dette explicitement bornée, audit des dépendances,
+- Ajouter une CI : formatage, tests, Clippy sans avertissement, audit des dépendances,
   scan des secrets et construction Docker.
 - Ajouter validation W3C et contrôles d'accessibilité automatisés sur le HTML rendu.
 - Documenter les environnements développement, test et production.

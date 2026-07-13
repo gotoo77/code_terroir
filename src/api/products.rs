@@ -16,7 +16,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("products"));
 
     let list_products = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -24,7 +23,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_products_handler);
 
     let get_product = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -33,7 +31,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(get_product_handler);
 
     let create_product = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
@@ -314,8 +311,7 @@ async fn update_product_handler(
     let nutriscore = update_request
         .nutriscore
         .as_deref()
-        .map(|value| normalize_nutriscore(Some(value)))
-        .flatten();
+        .and_then(|value| normalize_nutriscore(Some(value)));
 
     let product = match sqlx::query_as::<_, Product>(
         r#"

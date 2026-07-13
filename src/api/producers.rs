@@ -12,7 +12,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("producers"));
 
     let list_producers = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -20,7 +19,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_producers_handler);
 
     let get_producer = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -177,7 +175,7 @@ async fn update_producer_handler(
         RETURNING *
         "#,
     )
-    .bind(&producer_id)
+    .bind(producer_id)
     .bind(&update_request.raison_sociale)
     .bind(&update_request.agrement_sanitaire)
     .bind(&update_request.siret)

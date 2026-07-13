@@ -259,14 +259,14 @@ async fn get_traceability_data(
     if let Some(qr_tag) = qr_tag {
         // 2. Récupérer le batch
         let batch = sqlx::query_as::<_, Batch>("SELECT * FROM batches WHERE id = $1")
-            .bind(&qr_tag.batch_id)
+            .bind(qr_tag.batch_id)
             .fetch_optional(&state.db.pool)
             .await?;
 
         // 3. Récupérer le produit si le batch existe
         let product = if let Some(ref batch) = batch {
             sqlx::query_as::<_, Product>("SELECT * FROM products WHERE id = $1")
-                .bind(&batch.product_id)
+                .bind(batch.product_id)
                 .fetch_optional(&state.db.pool)
                 .await?
         } else {
@@ -619,14 +619,14 @@ fn generate_traceability_html(info: &TraceabilityInfo) -> String {
             macro_rows,
             ingredient_rows,
             escape_html(&batch.lot_code),
-            batch.production_date.format("%d/%m/%Y à %H:%M").to_string(),
-            batch.dluo_ddm.format("%d/%m/%Y").to_string(),
+            batch.production_date.format("%d/%m/%Y à %H:%M"),
+            batch.dluo_ddm.format("%d/%m/%Y"),
             batch.quantity_produced,
             escape_html(&batch.production_site),
             batch.notes.as_ref().map_or("".to_string(), |n|
                 format!("<div class=\"info-item\"><span class=\"label\">Notes :</span><span class=\"value\">{}</span></div>", escape_html(n))
             ),
-            chrono::Utc::now().format("%d/%m/%Y à %H:%M UTC").to_string()
+            chrono::Utc::now().format("%d/%m/%Y à %H:%M UTC")
         )
     } else {
         generate_error_html("inconnu")

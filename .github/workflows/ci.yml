@@ -38,7 +38,7 @@ jobs:
       - name: Run unit tests
         run: cargo test --locked
 
-      - name: Prevent new Clippy debt
+      - name: Reject Clippy warnings
         run: ./scripts/check-clippy-baseline.sh
 
       - name: Validate rendered HTML

@@ -17,7 +17,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 
     // List batches
     let list_batches = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -26,7 +25,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 
     // Get single batch
     let get_batch = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -36,7 +34,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 
     // Create batch
     let create_batch = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
@@ -46,7 +43,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 
     // Update batch
     let update_batch = api_prefix
-        .clone()
         .and(warp::put())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -57,7 +53,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 
     // Recall batch
     let recall_batch = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::param::<String>())
         .and(warp::path("recall"))
@@ -237,8 +232,7 @@ async fn create_batch_handler(
     let production_params_json = create_request
         .production_parameters
         .as_ref()
-        .map(|params| serde_json::to_value(params).ok())
-        .flatten();
+        .and_then(|params| serde_json::to_value(params).ok());
 
     // Insérer le lot dans la base de données
     match sqlx::query_as::<_, Batch>(
@@ -252,16 +246,16 @@ async fn create_batch_handler(
         RETURNING *
         "#,
     )
-    .bind(&batch_id)
-    .bind(&create_request.product_id)
-    .bind(&producer_id)
+    .bind(batch_id)
+    .bind(create_request.product_id)
+    .bind(producer_id)
     .bind(&lot_code)
-    .bind(&create_request.dluo_ddm)
-    .bind(&create_request.quantity_produced)
+    .bind(create_request.dluo_ddm)
+    .bind(create_request.quantity_produced)
     .bind(&create_request.production_site)
-    .bind(&create_request.operators.unwrap_or_default())
+    .bind(create_request.operators.unwrap_or_default())
     .bind(&production_params_json)
-    .bind(&BatchState::Draft.to_string())
+    .bind(BatchState::Draft.to_string())
     .bind(&create_request.notes)
     .fetch_one(&state.db.pool)
     .await
@@ -321,8 +315,7 @@ async fn update_batch_handler(
     let production_params_json = update_request
         .production_parameters
         .as_ref()
-        .map(|params| serde_json::to_value(params).ok())
-        .flatten();
+        .and_then(|params| serde_json::to_value(params).ok());
 
     match sqlx::query_as::<_, Batch>(
         r#"
@@ -345,7 +338,7 @@ async fn update_batch_handler(
     .bind(update_request.operators)
     .bind(production_params_json)
     .bind(update_request.notes)
-    .bind(&batch_id)
+    .bind(batch_id)
     .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
@@ -386,36 +379,6 @@ async fn update_batch_handler(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::TimeZone;
-
-    #[test]
-    fn update_batch_request_serializes_partial_update_payload() {
-        let request = UpdateBatchRequest {
-            dluo_ddm: Some(Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap()),
-            quantity_produced: Some(42),
-            production_site: Some("Atelier B".to_string()),
-            operators: Some(vec!["Rico".to_string()]),
-            production_parameters: None,
-            notes: Some("Ajustement".to_string()),
-        };
-
-        let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["quantity_produced"], 42);
-        assert_eq!(json["production_site"], "Atelier B");
-    }
-
-    #[test]
-    fn batch_permissions_separate_operations_and_recall() {
-        assert!(can_manage_batches(&UserRole::Atelier));
-        assert!(!can_manage_batches(&UserRole::ReadOnly));
-        assert!(can_recall_batches(&UserRole::Quality));
-        assert!(!can_recall_batches(&UserRole::Atelier));
-    }
-}
-
 // Handler pour rappeler un lot
 async fn recall_batch_handler(
     id: String,
@@ -445,7 +408,7 @@ async fn recall_batch_handler(
         "UPDATE batches SET state = 'recalled', recall_reason = $1, recall_date = NOW(), updated_at = NOW() WHERE id = $2 AND producer_id = $3 RETURNING *"
     )
     .bind(&recall_request.reason)
-    .bind(&batch_id)
+    .bind(batch_id)
     .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
@@ -503,4 +466,34 @@ fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
         })),
         warp::http::StatusCode::FORBIDDEN,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn update_batch_request_serializes_partial_update_payload() {
+        let request = UpdateBatchRequest {
+            dluo_ddm: Some(Utc.with_ymd_and_hms(2026, 4, 20, 10, 0, 0).unwrap()),
+            quantity_produced: Some(42),
+            production_site: Some("Atelier B".to_string()),
+            operators: Some(vec!["Rico".to_string()]),
+            production_parameters: None,
+            notes: Some("Ajustement".to_string()),
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["quantity_produced"], 42);
+        assert_eq!(json["production_site"], "Atelier B");
+    }
+
+    #[test]
+    fn batch_permissions_separate_operations_and_recall() {
+        assert!(can_manage_batches(&UserRole::Atelier));
+        assert!(!can_manage_batches(&UserRole::ReadOnly));
+        assert!(can_recall_batches(&UserRole::Quality));
+        assert!(!can_recall_batches(&UserRole::Atelier));
+    }
 }

@@ -17,7 +17,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("batches"));
 
     let list_checks = qa_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
         .and(auth::authenticated(state.clone()))
@@ -25,7 +24,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_checks_handler);
 
     let get_check = qa_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
@@ -43,7 +41,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(update_check_handler);
 
     let list_batch_checks = batch_prefix
-        .clone()
         .and(warp::path::param::<String>())
         .and(warp::path("qa"))
         .and(warp::get())
@@ -53,7 +50,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(list_batch_checks_handler);
 
     let create_batch_check = batch_prefix
-        .clone()
         .and(warp::path::param::<String>())
         .and(warp::path("qa"))
         .and(warp::post())

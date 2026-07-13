@@ -100,8 +100,7 @@ docker compose config --quiet
 docker build -t code-terroir .
 ```
 
-La dette Clippy actuelle est bornée par le script de contrôle : aucune nouvelle alerte n'est
-acceptée, et le plafond doit diminuer au fil des corrections.
+Clippy est exécuté avec `-D warnings` : aucun avertissement n'est accepté par la CI.
 
 ## Configuration
 
