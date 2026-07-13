@@ -100,10 +100,31 @@ show_api_failure() {
   fi
 }
 
+ensure_bootstrap_token() {
+  if grep -q '^BOOTSTRAP_TOKEN=.' .env 2>/dev/null; then
+    return 0
+  fi
+  if grep -q '^BOOTSTRAP_TOKEN=' .env 2>/dev/null; then
+    echo "❌ BOOTSTRAP_TOKEN existe mais est vide dans .env"
+    return 1
+  fi
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "❌ openssl est requis pour générer BOOTSTRAP_TOKEN"
+    return 1
+  fi
+
+  local bootstrap_token
+  bootstrap_token="$(openssl rand -hex 32)"
+  printf '\nBOOTSTRAP_TOKEN=%s\n' "$bootstrap_token" >> .env
+  chmod 600 .env
+  echo "✅ Jeton d’initialisation généré dans .env"
+}
+
 # -----------------------------------------------
 # 🚀 Commandes principales
 # -----------------------------------------------
 start() {
+  ensure_bootstrap_token || return 1
   start_dependencies || return 1
 
   if api_healthy; then
@@ -136,6 +157,7 @@ start() {
 }
 
 start_release() {
+  ensure_bootstrap_token || return 1
   start_dependencies || return 1
   echo "🚀 Compilation et lancement en mode RELEASE..."
   cargo build --release || { echo "❌ Erreur compilation release"; exit 1; }
