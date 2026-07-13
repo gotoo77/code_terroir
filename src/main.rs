@@ -67,14 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Combine all routes
     let routes = health
         .or(api_routes)
+        .recover(api::handle_rejection)
         .with(
             warp::cors()
                 .allow_origins(cors_allowed_origins.iter().map(String::as_str))
                 .allow_headers(vec!["authorization", "content-type"])
                 .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH"]),
         )
-        .with(warp::compression::gzip())
-        .recover(api::handle_rejection);
+        .with(warp::compression::gzip());
 
     let port = config.server_port;
     let addr = ([0, 0, 0, 0], port);
@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
 /*
 fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -136,4 +137,37 @@ fn init_tracing() {
         .with(formatting_layer)
         .with(TracingToGwlLayer)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use warp::Filter;
+
+    #[tokio::test]
+    async fn cors_headers_are_added_to_recovered_errors() {
+        let routes = warp::path("available")
+            .map(|| warp::reply::json(&serde_json::json!({"ok": true})))
+            .recover(api::handle_rejection)
+            .with(
+                warp::cors()
+                    .allow_origin("http://localhost:8081")
+                    .allow_headers(vec!["authorization", "content-type"])
+                    .allow_methods(vec!["GET", "POST"]),
+            );
+
+        let response = warp::test::request()
+            .path("/missing")
+            .header("origin", "http://localhost:8081")
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), warp::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin"),
+            Some(&warp::http::HeaderValue::from_static(
+                "http://localhost:8081"
+            ))
+        );
+    }
 }
