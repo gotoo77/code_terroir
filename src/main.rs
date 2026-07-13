@@ -43,6 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_conn = redis_client.get_connection_manager().await?;
     info!("✅ Redis connection established");
 
+    let cors_allowed_origins = config.cors_allowed_origins.clone();
+
     // Create shared application state
     let app_state = api::AppState {
         db: db_pool,
@@ -67,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .or(api_routes)
         .with(
             warp::cors()
-                .allow_any_origin()
+                .allow_origins(cors_allowed_origins.iter().map(String::as_str))
                 .allow_headers(vec!["authorization", "content-type"])
                 .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH"]),
         )

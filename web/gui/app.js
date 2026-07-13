@@ -20,27 +20,57 @@ function showResponse(responseId, status, statusText, body, isError = false) {
                 : 'status-200';
 
     responseDiv.style.display = 'block';
-    responseBody.innerHTML = `
-        <div class="${statusClass}">Status: ${status} ${statusText}</div>
-        <br>
-        <div>Response Body:</div>
-        <pre style="margin-left: 20px; white-space: pre-wrap;">${body}</pre>
-    `;
+    const statusLine = document.createElement('div');
+    statusLine.className = statusClass;
+    statusLine.textContent = `Status: ${status} ${statusText}`;
+    const label = document.createElement('div');
+    label.textContent = 'Response Body:';
+    const content = document.createElement('pre');
+    content.style.marginLeft = '20px';
+    content.style.whiteSpace = 'pre-wrap';
+    content.textContent = body;
+    responseBody.replaceChildren(statusLine, document.createElement('br'), label, content);
 }
 
-async function callApi(responseId, method, endpoint, body = null) {
+function apiHeaders(extraHeaders = {}) {
+    const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+    const accessToken = sessionStorage.getItem('accessToken');
+    if (accessToken) {
+        headers.Authorization = `Bearer ${accessToken}`;
+    }
+    return headers;
+}
+
+function rememberTokens(endpoint, response, data) {
+    if (!response.ok || !['/api/v1/auth/login', '/api/v1/auth/refresh', '/api/v1/auth/register'].includes(endpoint)) {
+        return;
+    }
+    try {
+        const payload = JSON.parse(data);
+        if (payload.access_token) sessionStorage.setItem('accessToken', payload.access_token);
+        if (payload.refresh_token) sessionStorage.setItem('refreshToken', payload.refresh_token);
+    } catch (_error) {
+        // La réponse brute reste affichée si elle n'est pas au format JSON attendu.
+    }
+}
+
+async function callApi(responseId, method, endpoint, body = null, extraHeaders = {}) {
     const responseDiv = document.getElementById(responseId);
     const responseBody = responseDiv.querySelector('.response-body');
     responseDiv.style.display = 'block';
-    responseBody.innerHTML = '<div class="loading">Chargement...</div>';
+    const loading = document.createElement('div');
+    loading.className = 'loading';
+    loading.textContent = 'Chargement...';
+    responseBody.replaceChildren(loading);
 
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, {
             method,
-            headers: { 'Content-Type': 'application/json' },
+            headers: apiHeaders(extraHeaders),
             body: body ? JSON.stringify(body) : null,
         });
         const data = await response.text();
+        rememberTokens(endpoint, response, data);
         showResponse(responseId, response.status, response.statusText, data);
         return response.status;
     } catch (error) {
@@ -83,9 +113,11 @@ async function testAuthRegister() {
         password: document.getElementById('auth-password').value.trim() || null,
         first_name: document.getElementById('auth-first-name').value.trim() || null,
         last_name: document.getElementById('auth-last-name').value.trim() || null,
-        role: document.getElementById('auth-role').value,
     };
-    await callApi('response-auth-register', 'POST', '/api/v1/auth/register', payload);
+    const bootstrapToken = document.getElementById('auth-bootstrap-token').value;
+    await callApi('response-auth-register', 'POST', '/api/v1/auth/register', payload, {
+        'X-Bootstrap-Token': bootstrapToken,
+    });
 }
 
 async function testAuthRefresh() {
@@ -148,22 +180,24 @@ async function loadProductCatalogSuggestions(mode) {
     const summary = document.getElementById(ids.summary);
     const suggestions = document.getElementById(ids.suggestions);
     summary.style.display = 'block';
-    summary.innerHTML = 'Chargement des suggestions...';
-    suggestions.innerHTML = '';
+    summary.textContent = 'Chargement des suggestions...';
+    suggestions.replaceChildren();
 
     try {
-        const response = await fetch(`${API_BASE}/api/v1/catalog/categories/${encodeURIComponent(category)}/ingredients`);
+        const response = await fetch(`${API_BASE}/api/v1/catalog/categories/${encodeURIComponent(category)}/ingredients`, {
+            headers: apiHeaders(),
+        });
         const payload = await response.json();
         if (!response.ok || !payload.success) {
-            summary.innerHTML = payload.error || 'Erreur de chargement des suggestions';
+            summary.textContent = payload.error || 'Erreur de chargement des suggestions';
             return;
         }
 
         productCatalogState[mode] = payload.ingredients || [];
-        summary.innerHTML = `${payload.count} suggestion(s) trouvee(s) pour la categorie <strong>${payload.category}</strong> et ${payload.producers.length} producteur(s) associe(s).`;
+        summary.textContent = `${payload.count} suggestion(s) trouvee(s) pour la categorie ${payload.category} et ${payload.producers.length} producteur(s) associe(s).`;
         renderProductCatalogSuggestions(mode);
     } catch (error) {
-        summary.innerHTML = `Erreur de chargement: ${error.message}`;
+        summary.textContent = `Erreur de chargement: ${error.message}`;
     }
 }
 
@@ -171,23 +205,44 @@ function renderProductCatalogSuggestions(mode) {
     const ids = getProductCompositionIds(mode);
     const suggestions = document.getElementById(ids.suggestions);
     const items = productCatalogState[mode];
+    suggestions.replaceChildren();
 
     if (!items.length) {
-        suggestions.innerHTML = '<div class="empty-state">Aucune suggestion pour cette categorie.</div>';
+        const emptyState = document.createElement('div');
+        emptyState.className = 'empty-state';
+        emptyState.textContent = 'Aucune suggestion pour cette categorie.';
+        suggestions.append(emptyState);
         return;
     }
 
-    suggestions.innerHTML = items.map((item, index) => `
-        <div class="catalog-card">
-            <div>
-                <strong>${item.ingredient_name}</strong>
-                <div class="muted-line">Categorie: ${item.ingredient_category || 'non renseignee'}</div>
-                <div class="muted-line">Producteur: ${item.producer.producer_name} (${item.producer.producer_city})</div>
-                <div class="muted-line">Allergenes: ${item.ingredient_allergens.length ? item.ingredient_allergens.join(', ') : 'aucun'}</div>
-            </div>
-            <button type="button" class="btn" onclick="addCatalogSuggestionToComposition('${mode}', ${index})">Ajouter</button>
-        </div>
-    `).join('');
+    items.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = 'catalog-card';
+        const information = document.createElement('div');
+        const name = document.createElement('strong');
+        name.textContent = item.ingredient_name;
+        information.append(name);
+
+        const lines = [
+            `Categorie: ${item.ingredient_category || 'non renseignee'}`,
+            `Producteur: ${item.producer.producer_name} (${item.producer.producer_city})`,
+            `Allergenes: ${item.ingredient_allergens.length ? item.ingredient_allergens.join(', ') : 'aucun'}`,
+        ];
+        lines.forEach((text) => {
+            const line = document.createElement('div');
+            line.className = 'muted-line';
+            line.textContent = text;
+            information.append(line);
+        });
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn';
+        button.textContent = 'Ajouter';
+        button.addEventListener('click', () => addCatalogSuggestionToComposition(mode, index));
+        card.append(information, button);
+        suggestions.append(card);
+    });
 }
 
 function addCatalogSuggestionToComposition(mode, index) {
@@ -242,27 +297,56 @@ function renderProductComposition(mode) {
     const items = productCompositionState[mode];
 
     payload.value = JSON.stringify(items.map(({ label, ...item }) => item), null, 2);
+    container.replaceChildren();
 
     if (!items.length) {
-        container.innerHTML = '<div class="empty-state">Aucun ingredient ajoute pour le moment.</div>';
+        const emptyState = document.createElement('div');
+        emptyState.className = 'empty-state';
+        emptyState.textContent = 'Aucun ingredient ajoute pour le moment.';
+        container.append(emptyState);
         return;
     }
 
-    container.innerHTML = items.map((item, index) => `
-        <div class="composition-item">
-            <div class="composition-item-header">
-                <strong>${item.label}</strong>
-                <button type="button" class="btn danger-btn" onclick="removeCompositionItem('${mode}', ${index})">Supprimer</button>
-            </div>
-            <div class="form-grid-4">
-                <div class="form-group"><label>Quantite</label><input type="number" step="0.1" value="${item.quantity ?? ''}" onchange="updateCompositionField('${mode}', ${index}, 'quantity', this.value)"></div>
-                <div class="form-group"><label>Unite</label><input type="text" value="${item.unit ?? ''}" onchange="updateCompositionField('${mode}', ${index}, 'unit', this.value)"></div>
-                <div class="form-group"><label>Ordre</label><input type="number" min="0" value="${item.sort_order ?? index}" onchange="updateCompositionField('${mode}', ${index}, 'sort_order', this.value)"></div>
-                <div class="form-group"><label>Categorie</label><input type="text" value="${item.ingredient_category ?? ''}" onchange="updateCompositionField('${mode}', ${index}, 'ingredient_category', this.value)"></div>
-            </div>
-            <div class="form-group"><label>Notes</label><input type="text" value="${item.notes ?? ''}" onchange="updateCompositionField('${mode}', ${index}, 'notes', this.value)"></div>
-        </div>
-    `).join('');
+    items.forEach((item, index) => {
+        const card = document.createElement('div');
+        card.className = 'composition-item';
+        const header = document.createElement('div');
+        header.className = 'composition-item-header';
+        const title = document.createElement('strong');
+        title.textContent = item.label;
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.className = 'btn danger-btn';
+        removeButton.textContent = 'Supprimer';
+        removeButton.addEventListener('click', () => removeCompositionItem(mode, index));
+        header.append(title, removeButton);
+
+        const grid = document.createElement('div');
+        grid.className = 'form-grid-4';
+        grid.append(
+            createCompositionField('Quantite', 'number', item.quantity ?? '', { step: '0.1' }, (value) => updateCompositionField(mode, index, 'quantity', value)),
+            createCompositionField('Unite', 'text', item.unit ?? '', {}, (value) => updateCompositionField(mode, index, 'unit', value)),
+            createCompositionField('Ordre', 'number', item.sort_order ?? index, { min: '0' }, (value) => updateCompositionField(mode, index, 'sort_order', value)),
+            createCompositionField('Categorie', 'text', item.ingredient_category ?? '', {}, (value) => updateCompositionField(mode, index, 'ingredient_category', value)),
+        );
+        const notes = createCompositionField('Notes', 'text', item.notes ?? '', {}, (value) => updateCompositionField(mode, index, 'notes', value));
+        card.append(header, grid, notes);
+        container.append(card);
+    });
+}
+
+function createCompositionField(labelText, type, value, attributes, onChange) {
+    const group = document.createElement('div');
+    group.className = 'form-group';
+    const label = document.createElement('label');
+    label.textContent = labelText;
+    const input = document.createElement('input');
+    input.type = type;
+    input.value = value;
+    Object.entries(attributes).forEach(([name, attributeValue]) => input.setAttribute(name, attributeValue));
+    input.addEventListener('change', () => onChange(input.value));
+    group.append(label, input);
+    return group;
 }
 
 async function getProductById() {

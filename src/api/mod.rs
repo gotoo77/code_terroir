@@ -29,6 +29,7 @@ pub struct AppState {
 // Routes principales
 pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     let auth_routes = auth::routes(state.clone());
+    let access_token = auth::require_access_token(state.clone());
     let product_routes = products::routes(state.clone());
     let producer_routes = producers::routes(state.clone());
     let supplier_routes = suppliers::routes(state.clone());
@@ -41,8 +42,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
     let qr_tag_routes = qr_tags::routes(state.clone());
     let public_routes = public::routes(state.clone());
 
-    auth_routes
-        .or(product_routes)
+    let private_routes = product_routes
         .or(producer_routes)
         .or(supplier_routes)
         .or(ingredient_routes)
@@ -51,8 +51,11 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .or(recipe_routes)
         .or(batch_routes)
         // .or(qr_routes)  // Obsolète
-        .or(qr_tag_routes)
+        .or(qr_tag_routes);
+
+    auth_routes
         .or(public_routes)
+        .or(access_token.and(private_routes))
 }
 
 // Gestionnaire d'erreurs global
@@ -60,7 +63,10 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> 
     let code;
     let message;
 
-    if err.is_not_found() {
+    if err.find::<auth::AuthenticationRequired>().is_some() {
+        code = warp::http::StatusCode::UNAUTHORIZED;
+        message = "Authentication required";
+    } else if err.is_not_found() {
         code = warp::http::StatusCode::NOT_FOUND;
         message = "Resource not found";
     } else if let Some(_) = err.find::<warp::filters::body::BodyDeserializeError>() {
@@ -80,5 +86,13 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> 
         "code": code.as_u16()
     }));
 
-    Ok(warp::reply::with_status(json, code))
+    let mut response = warp::reply::with_status(json, code).into_response();
+    if code == warp::http::StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            warp::http::header::WWW_AUTHENTICATE,
+            warp::http::HeaderValue::from_static("Bearer"),
+        );
+    }
+
+    Ok(response)
 }

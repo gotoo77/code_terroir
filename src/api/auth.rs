@@ -12,13 +12,13 @@ use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegisterRequest {
     producer_id: Option<Uuid>,
     email: String,
     password: String,
     first_name: String,
     last_name: String,
-    role: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +35,11 @@ struct TokenClaims {
     exp: usize,
     iat: usize,
 }
+
+#[derive(Debug)]
+pub(crate) struct AuthenticationRequired;
+
+impl warp::reject::Reject for AuthenticationRequired {}
 
 pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
@@ -56,6 +61,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(warp::header::optional::<String>("x-bootstrap-token"))
         .and(with_state(state.clone()))
         .and_then(register_handler);
 
@@ -68,6 +74,39 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and_then(refresh_handler);
 
     login.or(register).or(refresh)
+}
+
+pub fn require_access_token(
+    state: AppState,
+) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+    warp::header::optional::<String>("authorization")
+        .and(with_state(state))
+        .and_then(validate_access_token)
+        .untuple_one()
+}
+
+async fn validate_access_token(
+    authorization: Option<String>,
+    state: AppState,
+) -> Result<(), Rejection> {
+    let token = authorization
+        .as_deref()
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| warp::reject::custom(AuthenticationRequired))?;
+
+    let claims = decode_claims(token, "access", &state.config.jwt_secret)
+        .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
+
+    Uuid::parse_str(&claims.sub)
+        .and_then(|_| Uuid::parse_str(&claims.producer_id))
+        .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
+    claims
+        .role
+        .parse::<crate::models::user::UserRole>()
+        .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
+
+    Ok(())
 }
 
 fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Infallible> + Clone {
@@ -147,8 +186,19 @@ async fn login_handler(request: LoginRequest, state: AppState) -> Result<impl Re
 
 async fn register_handler(
     request: RegisterRequest,
+    bootstrap_token: Option<String>,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !bootstrap_token_matches(
+        state.config.bootstrap_token.as_deref(),
+        bootstrap_token.as_deref(),
+    ) {
+        return Ok(auth_error(
+            "Initialisation non autorisée",
+            warp::http::StatusCode::FORBIDDEN,
+        ));
+    }
+
     if request.password.len() < state.config.security.password_min_length {
         return Ok(auth_error(
             &format!(
@@ -164,30 +214,36 @@ async fn register_handler(
         Err(response) => return Ok(response),
     };
 
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE email = $1")
-        .bind(&request.email)
-        .fetch_optional(&state.db.pool)
-        .await
-    {
-        Ok(Some(_)) => {
-            return Ok(auth_error(
-                "Un utilisateur existe déjà avec cet email",
-                warp::http::StatusCode::CONFLICT,
-            ))
-        }
-        Ok(None) => {}
-        Err(error) => {
-            return Ok(error_response(
-                "Erreur lors de la vérification email",
-                error,
-            ))
-        }
-    }
-
     let password_hash = match hash_password(&request.password) {
         Ok(hash) => hash,
         Err(error) => return Ok(error_response("Erreur lors du hash du mot de passe", error)),
     };
+
+    let mut transaction = match state.db.pool.begin().await {
+        Ok(transaction) => transaction,
+        Err(error) => return Ok(error_response("Erreur lors de l'initialisation", error)),
+    };
+
+    if let Err(error) = sqlx::query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut *transaction)
+        .await
+    {
+        return Ok(error_response("Erreur lors de l'initialisation", error));
+    }
+
+    match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *transaction)
+        .await
+    {
+        Ok(0) => {}
+        Ok(_) => {
+            return Ok(auth_error(
+                "Initialisation déjà effectuée",
+                warp::http::StatusCode::FORBIDDEN,
+            ))
+        }
+        Err(error) => return Ok(error_response("Erreur lors de l'initialisation", error)),
+    }
 
     let user_id = Uuid::new_v4();
     let user = match sqlx::query_as::<_, User>(
@@ -205,13 +261,17 @@ async fn register_handler(
     .bind(password_hash)
     .bind(&request.first_name)
     .bind(&request.last_name)
-    .bind(normalize_role(&request.role))
-    .fetch_one(&state.db.pool)
+    .bind("admin")
+    .fetch_one(&mut *transaction)
     .await
     {
         Ok(user) => user,
         Err(error) => return Ok(error_response("Erreur lors de la création utilisateur", error)),
     };
+
+    if let Err(error) = transaction.commit().await {
+        return Ok(error_response("Erreur lors de l'initialisation", error));
+    }
 
     let response = match build_login_response(&user, &state) {
         Ok(response) => response,
@@ -339,29 +399,44 @@ fn decode_token(
     expected_type: &str,
     state: &AppState,
 ) -> Result<TokenClaims, warp::reply::WithStatus<warp::reply::Json>> {
+    decode_claims(token, expected_type, &state.config.jwt_secret)
+        .map_err(|_| auth_error("Token invalide", warp::http::StatusCode::UNAUTHORIZED))
+}
+
+fn decode_claims(
+    token: &str,
+    expected_type: &str,
+    jwt_secret: &str,
+) -> Result<TokenClaims, jsonwebtoken::errors::Error> {
     let decoded = decode::<TokenClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &DecodingKey::from_secret(jwt_secret.as_bytes()),
         &Validation::default(),
-    )
-    .map_err(|_| auth_error("Token invalide", warp::http::StatusCode::UNAUTHORIZED))?;
+    )?;
 
     if decoded.claims.token_type != expected_type {
-        return Err(auth_error(
-            "Type de token invalide",
-            warp::http::StatusCode::UNAUTHORIZED,
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::InvalidToken,
         ));
     }
 
     Ok(decoded.claims)
 }
-fn normalize_role(role: &str) -> String {
-    match role.trim().to_ascii_lowercase().as_str() {
-        "admin" | "quality" | "atelier" | "logistics" | "readonly" => {
-            role.trim().to_ascii_lowercase()
-        }
-        _ => String::from("atelier"),
-    }
+
+fn bootstrap_token_matches(configured: Option<&str>, provided: Option<&str>) -> bool {
+    let (Some(configured), Some(provided)) = (configured, provided) else {
+        return false;
+    };
+
+    configured.len() >= 32
+        && configured.len() == provided.len()
+        && configured
+            .bytes()
+            .zip(provided.bytes())
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
 }
 
 fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
@@ -440,8 +515,7 @@ fn error_response<E: std::fmt::Display>(
     warp::reply::with_status(
         warp::reply::json(&serde_json::json!({
             "success": false,
-            "error": message,
-            "details": error.to_string()
+            "error": message
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     )
@@ -449,12 +523,22 @@ fn error_response<E: std::fmt::Display>(
 
 #[cfg(test)]
 mod tests {
-    use super::{hash_password, normalize_role, verify_password};
+    use super::{
+        bootstrap_token_matches, decode_claims, hash_password, verify_password, RegisterRequest,
+        TokenClaims,
+    };
+    use jsonwebtoken::{encode, EncodingKey, Header};
 
     #[test]
-    fn normalize_role_falls_back_to_atelier() {
-        assert_eq!(normalize_role("ADMIN"), "admin");
-        assert_eq!(normalize_role("nimportequoi"), "atelier");
+    fn bootstrap_requires_a_long_exact_token() {
+        let token = "a-very-long-bootstrap-token-123456789";
+        assert!(bootstrap_token_matches(Some(token), Some(token)));
+        assert!(!bootstrap_token_matches(Some(token), Some("wrong")));
+        assert!(!bootstrap_token_matches(
+            Some("too-short"),
+            Some("too-short")
+        ));
+        assert!(!bootstrap_token_matches(None, Some(token)));
     }
 
     #[test]
@@ -462,5 +546,39 @@ mod tests {
         let hash = hash_password("secret123").expect("hash password");
         verify_password("secret123", &hash).expect("verify password");
         assert!(verify_password("bad", &hash).is_err());
+    }
+
+    #[test]
+    fn registration_rejects_a_client_selected_role() {
+        let request = serde_json::json!({
+            "producer_id": null,
+            "email": "admin@example.test",
+            "password": "a-long-password",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "role": "admin"
+        });
+
+        assert!(serde_json::from_value::<RegisterRequest>(request).is_err());
+    }
+
+    #[test]
+    fn access_decoder_rejects_a_refresh_token() {
+        let claims = TokenClaims {
+            sub: uuid::Uuid::new_v4().to_string(),
+            producer_id: uuid::Uuid::new_v4().to_string(),
+            role: "admin".to_string(),
+            token_type: "refresh".to_string(),
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            iat: chrono::Utc::now().timestamp() as usize,
+        };
+        let token = encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .expect("encode test token");
+
+        assert!(decode_claims(&token, "access", "test-secret").is_err());
     }
 }

@@ -4,8 +4,9 @@ Plateforme de traçabilité pour producteurs artisanaux, écrite en Rust avec Po
 
 > [!WARNING]
 > La version actuelle est une preuve de concept fonctionnelle destinée au développement. Les
-> routes métier ne sont pas encore protégées par les autorisations attendues en production. Ne
-> déployez pas cette version sur Internet et n'y stockez pas de données réelles.
+> routes métier exigent désormais un JWT, mais le cloisonnement par producteur, le RBAC complet et
+> la gestion des sessions ne sont pas encore finalisés. Ne déployez pas cette version sur Internet
+> et n'y stockez pas de données réelles.
 
 La première version fonctionnelle est figée par le tag `v0.1.0`. Le travail de sécurisation et de
 refonte de l'expérience utilisateur est suivi dans le
@@ -18,13 +19,14 @@ refonte de l'expérience utilisateur est suivi dans le
 - contrôles qualité et rappels de lots ;
 - génération de QR codes et fiche publique de traçabilité ;
 - enregistrement et consultation de statistiques de scans ;
-- authentification JWT expérimentale ;
+- authentification JWT appliquée aux routes métier ;
 - interface HTML locale de test pour appeler l'API.
 
 ## Limites connues
 
 - l'interface actuelle est un testeur d'API pour développeurs, pas encore l'interface métier cible ;
-- authentification et rôles non appliqués aux routes de gestion ;
+- filtrage des données par producteur et permissions par rôle encore incomplets ;
+- jetons de rafraîchissement sans rotation ni révocation ;
 - pas encore de 2FA, PWA, export PDF opérationnel ou mode hors ligne ;
 - pas encore de tests d'intégration ou E2E ;
 - le Compose fourni est réservé au développement local ;
@@ -108,11 +110,16 @@ Les variables sont documentées dans [.env.example](.env.example). Les plus impo
 - `DATABASE_URL` et `DOCKER_DATABASE_URL` ;
 - `REDIS_URL` ;
 - `JWT_SECRET` ;
+- `BOOTSTRAP_TOKEN`, jeton aléatoire d'au moins 32 caractères utilisé une seule fois pour créer le
+  premier administrateur ;
+- `CORS_ALLOWED_ORIGINS`, liste d'origines autorisées séparées par des virgules ;
 - `QR_BASE_URL` et `BASE_URL` ;
 - `POSTGRES_PASSWORD` et `GRAFANA_ADMIN_PASSWORD`.
 
 Les secrets doivent être fournis par l'environnement en production, jamais intégrés à une image
-ou au dépôt.
+ou au dépôt. L'inscription publique est désactivée après le premier compte et le rôle de ce compte
+est imposé côté serveur. À ce stade, un producteur doit déjà exister en base avant cette
+initialisation ; ce parcours sera remplacé par l'assistant de configuration métier.
 
 ## État du projet
 
