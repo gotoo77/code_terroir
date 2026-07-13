@@ -1,7 +1,7 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::recipe::{CreateRecipeRequest, Recipe, RecipeWithDetails, UpdateRecipeRequest};
-use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -156,7 +156,9 @@ async fn create_recipe_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog)
+        || create_request.producer_id != authenticated.producer_id
+    {
         return Ok(forbidden());
     }
 
@@ -218,7 +220,7 @@ async fn update_recipe_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
         return Ok(forbidden());
     }
     let recipe_id = match Uuid::parse_str(&id) {
@@ -362,20 +364,28 @@ async fn update_recipe_handler(
         .bind(next_name)
         .bind(&next_ingredients)
         .bind(&next_steps)
-        .bind(authenticated.producer_id)
         .bind(next_notes)
         .bind(&next_ingredients)
         .bind(&next_steps)
-        .fetch_one(&state.db.pool)
+        .bind(authenticated.producer_id)
+        .fetch_optional(&state.db.pool)
         .await
         {
-            Ok(recipe) => Ok(warp::reply::with_status(
+            Ok(Some(recipe)) => Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({
                     "success": true,
                     "message": "Recette mise à jour avec succès",
                     "recipe": RecipeWithDetails::from_recipe(recipe)
                 })),
                 warp::http::StatusCode::OK,
+            )),
+            Ok(None) => Ok(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({
+                    "success": false,
+                    "error": "Recette non trouvée",
+                    "recipe_id": id
+                })),
+                warp::http::StatusCode::NOT_FOUND,
             )),
             Err(e) => {
                 tracing::error!("Erreur lors de la mise à jour de la recette: {:?}", e);
@@ -406,10 +416,6 @@ async fn next_recipe_version(
     .await?;
 
     Ok(max_version.unwrap_or(0) + 1)
-}
-
-fn can_write(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {

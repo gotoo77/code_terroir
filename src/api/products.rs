@@ -1,10 +1,10 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::product::{
     normalize_allergens, normalize_nutriscore, CreateProductIngredientLink, CreateProductRequest,
     Product, ProductIngredientLink, ProductWithRelations, UpdateProductRequest,
 };
-use crate::models::user::UserRole;
 use sqlx::{Postgres, Transaction};
 use std::convert::Infallible;
 use uuid::Uuid;
@@ -71,11 +71,13 @@ async fn list_products_handler(
         Ok(products) => {
             let mut enriched_products = Vec::with_capacity(products.len());
             for product in products {
-                let product_ingredients = match fetch_product_ingredients(product.id, &state).await
-                {
-                    Ok(value) => value,
-                    Err(response) => return Ok(response),
-                };
+                let product_ingredients =
+                    match fetch_product_ingredients(product.id, authenticated.producer_id, &state)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(response) => return Ok(response),
+                    };
                 enriched_products.push(ProductWithRelations {
                     product,
                     product_ingredients,
@@ -115,7 +117,13 @@ async fn get_product_handler(
         .await
     {
         Ok(Some(product)) => {
-            let product_ingredients = match fetch_product_ingredients(product.id, &state).await {
+            let product_ingredients = match fetch_product_ingredients(
+                product.id,
+                authenticated.producer_id,
+                &state,
+            )
+            .await
+            {
                 Ok(value) => value,
                 Err(response) => return Ok(response),
             };
@@ -151,7 +159,7 @@ async fn create_product_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write_catalog(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
         return Ok(forbidden());
     }
     if create_request
@@ -281,7 +289,7 @@ async fn update_product_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write_catalog(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
         return Ok(forbidden());
     }
     if update_request
@@ -414,7 +422,9 @@ async fn update_product_handler(
                 Err(response) => return Ok(response),
             }
         }
-        None => match fetch_product_ingredients_tx(product.id, &mut tx).await {
+        None => match fetch_product_ingredients_tx(product.id, authenticated.producer_id, &mut tx)
+            .await
+        {
             Ok(value) => value,
             Err(e) => {
                 return Ok(internal_error_response(
@@ -447,12 +457,22 @@ async fn update_product_handler(
 
 async fn fetch_product_ingredients(
     product_id: Uuid,
+    producer_id: Uuid,
     state: &AppState,
 ) -> Result<Vec<ProductIngredientLink>, warp::reply::WithStatus<warp::reply::Json>> {
     sqlx::query_as::<_, ProductIngredientLink>(
-        "SELECT * FROM product_ingredients WHERE product_id = $1 ORDER BY sort_order, created_at",
+        r#"
+        SELECT pi.*
+        FROM product_ingredients pi
+        INNER JOIN products p ON p.id = pi.product_id
+        WHERE pi.product_id = $1
+          AND pi.producer_id = $2
+          AND p.producer_id = $2
+        ORDER BY pi.sort_order, pi.created_at
+        "#,
     )
     .bind(product_id)
+    .bind(producer_id)
     .fetch_all(&state.db.pool)
     .await
     .map_err(|e| internal_error_response("Erreur lors de la récupération des liaisons produit", e))
@@ -460,12 +480,22 @@ async fn fetch_product_ingredients(
 
 async fn fetch_product_ingredients_tx(
     product_id: Uuid,
+    producer_id: Uuid,
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<Vec<ProductIngredientLink>, sqlx::Error> {
     sqlx::query_as::<_, ProductIngredientLink>(
-        "SELECT * FROM product_ingredients WHERE product_id = $1 ORDER BY sort_order, created_at",
+        r#"
+        SELECT pi.*
+        FROM product_ingredients pi
+        INNER JOIN products p ON p.id = pi.product_id
+        WHERE pi.product_id = $1
+          AND pi.producer_id = $2
+          AND p.producer_id = $2
+        ORDER BY pi.sort_order, pi.created_at
+        "#,
     )
     .bind(product_id)
+    .bind(producer_id)
     .fetch_all(&mut **tx)
     .await
 }
@@ -478,7 +508,7 @@ async fn sync_product_ingredients(
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<Vec<ProductIngredientLink>, warp::reply::WithStatus<warp::reply::Json>> {
     let Some(links) = links else {
-        return fetch_product_ingredients_tx(product_id, tx)
+        return fetch_product_ingredients_tx(product_id, producer_id, tx)
             .await
             .map_err(|e| {
                 internal_error_response("Erreur lors de la récupération des liaisons produit", e)
@@ -487,10 +517,23 @@ async fn sync_product_ingredients(
 
     validate_product_ingredient_links(links, producer_id, state, tx).await?;
 
-    if let Err(e) = sqlx::query("DELETE FROM product_ingredients WHERE product_id = $1")
-        .bind(product_id)
-        .execute(&mut **tx)
-        .await
+    if let Err(e) = sqlx::query(
+        r#"
+        DELETE FROM product_ingredients pi
+        WHERE pi.product_id = $1
+          AND pi.producer_id = $2
+          AND EXISTS (
+              SELECT 1
+              FROM products p
+              WHERE p.id = pi.product_id
+                AND p.producer_id = $2
+          )
+        "#,
+    )
+    .bind(product_id)
+    .bind(producer_id)
+    .execute(&mut **tx)
+    .await
     {
         return Err(internal_error_response(
             "Erreur lors de la réinitialisation des ingrédients du produit",
@@ -527,7 +570,7 @@ async fn sync_product_ingredients(
         }
     }
 
-    fetch_product_ingredients_tx(product_id, tx)
+    fetch_product_ingredients_tx(product_id, producer_id, tx)
         .await
         .map_err(|e| {
             internal_error_response("Erreur lors de la récupération des liaisons produit", e)
@@ -574,10 +617,6 @@ async fn validate_product_ingredient_links(
     }
 
     Ok(())
-}
-
-fn can_write_catalog(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
@@ -629,19 +668,4 @@ fn internal_error_response<E: std::fmt::Display>(
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::can_write_catalog;
-    use crate::models::user::UserRole;
-
-    #[test]
-    fn catalog_write_permissions_are_explicit() {
-        assert!(can_write_catalog(&UserRole::Admin));
-        assert!(can_write_catalog(&UserRole::Atelier));
-        assert!(!can_write_catalog(&UserRole::Quality));
-        assert!(!can_write_catalog(&UserRole::Logistics));
-        assert!(!can_write_catalog(&UserRole::ReadOnly));
-    }
 }

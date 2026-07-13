@@ -1,9 +1,9 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::qa_check::{
     CreateQACheckRequest, QACheck, QACheckSummary, QACheckType, QAThresholds, UpdateQACheckRequest,
 };
-use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -171,7 +171,7 @@ async fn create_batch_check_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_create_check(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::CreateQualityCheck) {
         return Ok(forbidden());
     }
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
@@ -268,7 +268,7 @@ async fn update_check_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_update_check(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::UpdateQualityCheck) {
         return Ok(forbidden());
     }
     let check_id = match parse_uuid_param(&id, "ID contrôle qualité invalide") {
@@ -323,6 +323,12 @@ async fn update_check_handler(
             notes = $7,
             attachments = $8
         WHERE id = $1
+          AND EXISTS (
+              SELECT 1
+              FROM batches b
+              WHERE b.id = qa_checks.batch_id
+                AND b.producer_id = $9
+          )
         RETURNING *
         "#,
     )
@@ -334,10 +340,11 @@ async fn update_check_handler(
     .bind(updated.unit)
     .bind(updated.notes)
     .bind(updated.attachments)
-    .fetch_one(&state.db.pool)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
     .await
     {
-        Ok(check) => Ok(warp::reply::with_status(
+        Ok(Some(check)) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
                 "success": true,
                 "message": "Contrôle qualité mis à jour avec succès",
@@ -345,6 +352,7 @@ async fn update_check_handler(
             })),
             warp::http::StatusCode::OK,
         )),
+        Ok(None) => Ok(not_found("Contrôle qualité non trouvé", "qa_check_id", id)),
         Err(e) => server_error("Erreur lors de la mise à jour du contrôle qualité", e),
     }
 }
@@ -363,9 +371,11 @@ async fn get_batch_summary_handler(
         return Ok(reply);
     }
 
-    let total_checks =
-        match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM qa_checks WHERE batch_id = $1")
+    let total_checks = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2",
+    )
             .bind(batch_id)
+            .bind(authenticated.producer_id)
             .fetch_one(&state.db.pool)
             .await
         {
@@ -374,9 +384,10 @@ async fn get_batch_summary_handler(
         };
 
     let compliant_checks = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM qa_checks WHERE batch_id = $1 AND is_compliant = true",
+        "SELECT COUNT(*) FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND q.is_compliant = true AND b.producer_id = $2",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_one(&state.db.pool)
     .await
     {
@@ -385,9 +396,10 @@ async fn get_batch_summary_handler(
     };
 
     let check_types = match sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT check_type FROM qa_checks WHERE batch_id = $1 ORDER BY check_type",
+        "SELECT DISTINCT q.check_type FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2 ORDER BY q.check_type",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -543,17 +555,6 @@ fn apply_default_thresholds(check: &mut QACheck, check_type: &QACheckType) {
         }
         _ => {}
     }
-}
-
-fn can_create_check(role: &UserRole) -> bool {
-    matches!(
-        role,
-        UserRole::Admin | UserRole::Quality | UserRole::Atelier
-    )
-}
-
-fn can_update_check(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Quality)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {

@@ -30,3 +30,23 @@ deviendront administrables depuis l'interface.
 - Garder les gestionnaires HTTP minces et déplacer progressivement la logique vers des modules
   métier testables.
 - Ajouter une fonctionnalité réelle plutôt qu'un module vide réservé à un usage futur.
+
+## Autorisation et cloisonnement
+
+Les permissions d'écriture sont définies dans une matrice unique dans
+`src/api/authorization.rs`. Les routes de lecture restent accessibles à tout compte actif, mais
+chaque requête filtre systématiquement les données avec le `producer_id` issu du jeton.
+
+| Action | Admin | Qualité | Atelier | Logistique | Lecture seule |
+|---|---:|---:|---:|---:|---:|
+| Gérer le catalogue | Oui | Non | Oui | Non | Non |
+| Gérer les lots | Oui | Non | Oui | Non | Non |
+| Rappeler un lot | Oui | Oui | Non | Non | Non |
+| Créer un contrôle qualité | Oui | Oui | Oui | Non | Non |
+| Modifier un contrôle qualité | Oui | Oui | Non | Non | Non |
+| Gérer les QR codes | Oui | Non | Oui | Non | Non |
+| Modifier le producteur | Oui | Non | Non | Non | Non |
+
+Le cloisonnement est répété dans les requêtes SQL finales, y compris lorsqu'une vérification
+d'appartenance a déjà été effectuée auparavant. Cette redondance volontaire évite qu'une écriture
+inter-producteurs devienne possible lors d'une évolution ultérieure du code.

@@ -1,10 +1,10 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::batch::{
     generate_lot_code, Batch, BatchState, CreateBatchRequest, RecallBatchRequest,
     UpdateBatchRequest,
 };
-use crate::models::user::UserRole;
 use chrono::Utc;
 use std::convert::Infallible;
 use uuid::Uuid;
@@ -182,7 +182,7 @@ async fn create_batch_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_manage_batches(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageBatches) {
         return Ok(forbidden());
     }
     // Générer un nouvel ID
@@ -294,7 +294,7 @@ async fn update_batch_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_manage_batches(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageBatches) {
         return Ok(forbidden());
     }
     let batch_id = match Uuid::parse_str(&id) {
@@ -386,7 +386,7 @@ async fn recall_batch_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_recall_batches(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::RecallBatches) {
         return Ok(forbidden());
     }
     let batch_id = match Uuid::parse_str(&id) {
@@ -450,14 +450,6 @@ async fn recall_batch_handler(
     }
 }
 
-fn can_manage_batches(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
-}
-
-fn can_recall_batches(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Quality)
-}
-
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
     warp::reply::with_status(
         warp::reply::json(&serde_json::json!({
@@ -487,13 +479,5 @@ mod tests {
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["quantity_produced"], 42);
         assert_eq!(json["production_site"], "Atelier B");
-    }
-
-    #[test]
-    fn batch_permissions_separate_operations_and_recall() {
-        assert!(can_manage_batches(&UserRole::Atelier));
-        assert!(!can_manage_batches(&UserRole::ReadOnly));
-        assert!(can_recall_batches(&UserRole::Quality));
-        assert!(!can_recall_batches(&UserRole::Atelier));
     }
 }

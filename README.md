@@ -12,7 +12,7 @@ La première version fonctionnelle est figée par le tag `v0.1.0`. Le travail de
 refonte de l'expérience utilisateur est suivi dans le
 [plan de mise en production](docs/PRODUCTION_READINESS_PLAN.md).
 
-La branche de préparation utilise actuellement la version `0.2.0-alpha.1`. Les changements sont
+La branche de préparation utilise actuellement la version `0.2.0-alpha.2`. Les changements sont
 consignés dans [`CHANGELOG.md`](CHANGELOG.md) et la procédure de release est décrite dans
 [`docs/VERSIONING.md`](docs/VERSIONING.md).
 

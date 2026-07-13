@@ -1,9 +1,9 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::qr_tag::{
     generate_unique_slug, CreateQRTagRequest, QRFormat, QRTag, RecordScanRequest,
 };
-use crate::models::user::UserRole;
 use sqlx::types::ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use sqlx::FromRow;
 use std::convert::Infallible;
@@ -205,7 +205,7 @@ async fn create_qr_tag_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_manage_qr_tags(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageQrTags) {
         return Ok(forbidden());
     }
 
@@ -375,9 +375,20 @@ async fn scan_qr_handler(
         Ok(_) => {
             // Incrémenter le compteur de scans
             let _ = sqlx::query(
-                "UPDATE qr_tags SET scan_count = scan_count + 1, last_scanned_at = NOW() WHERE id = $1"
+                r#"
+                UPDATE qr_tags q
+                SET scan_count = scan_count + 1, last_scanned_at = NOW()
+                WHERE q.id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM batches b
+                      WHERE b.id = q.batch_id
+                        AND b.producer_id = $2
+                  )
+                "#,
             )
             .bind(qr_tag.id)
+            .bind(authenticated.producer_id)
             .execute(&state.db.pool)
             .await;
 
@@ -496,10 +507,6 @@ async fn get_qr_analytics_handler(
         warp::reply::json(&response),
         warp::http::StatusCode::OK,
     ))
-}
-
-fn can_manage_qr_tags(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
@@ -667,13 +674,5 @@ mod tests {
             serde_json::to_string(&QRFormat::Svg).expect("serialize SVG"),
             "\"SVG\""
         );
-    }
-
-    #[test]
-    fn qr_tag_management_is_limited_to_admin_and_workshop_roles() {
-        assert!(can_manage_qr_tags(&UserRole::Admin));
-        assert!(can_manage_qr_tags(&UserRole::Atelier));
-        assert!(!can_manage_qr_tags(&UserRole::Quality));
-        assert!(!can_manage_qr_tags(&UserRole::ReadOnly));
     }
 }

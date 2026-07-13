@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::database::DatabasePool;
 
 pub mod auth;
+pub mod authorization;
 pub mod batches;
 pub mod catalog;
 pub mod ingredients;

@@ -1,8 +1,8 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::ingredient::{CreateIngredientRequest, Ingredient, UpdateIngredientRequest};
 use crate::models::product::normalize_allergens;
-use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -152,7 +152,9 @@ async fn create_ingredient_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog)
+        || create_request.producer_id != authenticated.producer_id
+    {
         return Ok(forbidden());
     }
     if create_request.category.as_deref().is_some_and(|category| {
@@ -222,7 +224,7 @@ async fn update_ingredient_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
         return Ok(forbidden());
     }
     if update_request.category.as_deref().is_some_and(|category| {
@@ -352,10 +354,6 @@ async fn ensure_supplier_exists(
             ))
         }
     }
-}
-
-fn can_write(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {

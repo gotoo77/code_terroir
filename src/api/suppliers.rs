@@ -1,7 +1,7 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::supplier::{CreateSupplierRequest, Supplier, UpdateSupplierRequest};
-use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -151,7 +151,9 @@ async fn create_supplier_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog)
+        || create_request.producer_id != authenticated.producer_id
+    {
         return Ok(forbidden());
     }
     let producer_id = authenticated.producer_id;
@@ -206,7 +208,7 @@ async fn update_supplier_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if !can_write(&authenticated.role) {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
         return Ok(forbidden());
     }
     let supplier_id = match Uuid::parse_str(&id) {
@@ -279,10 +281,6 @@ async fn update_supplier_handler(
             ))
         }
     }
-}
-
-fn can_write(role: &UserRole) -> bool {
-    matches!(role, UserRole::Admin | UserRole::Atelier)
 }
 
 fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {

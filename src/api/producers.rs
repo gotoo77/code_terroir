@@ -1,7 +1,7 @@
 use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
 use crate::api::{auth, AppState};
 use crate::models::producer::{Producer, UpdateProducerRequest};
-use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -137,7 +137,7 @@ async fn update_producer_handler(
     authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if authenticated.role != UserRole::Admin {
+    if !is_allowed(&authenticated.role, Action::ManageProducer) {
         return Ok(forbidden("Droits administrateur requis"));
     }
     let producer_id = match Uuid::parse_str(&id) {

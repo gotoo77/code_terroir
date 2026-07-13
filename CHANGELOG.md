@@ -6,7 +6,7 @@ Les changements notables de Code Terroir sont consignés dans ce fichier. Le pro
 
 ## [Unreleased]
 
-Version de développement ciblée : `0.2.0-alpha.1`.
+Version de développement ciblée : `0.2.0-alpha.2`.
 
 ### Added
 
@@ -20,7 +20,7 @@ Version de développement ciblée : `0.2.0-alpha.1`.
 
 ### Changed
 
-- Cloisonnement progressif des données par producteur et permissions explicites sur les routes.
+- Cloisonnement systématique des données par producteur et matrice RBAC centralisée sur les routes.
 - Rotation des secrets locaux d'initialisation et durcissement de la configuration CORS/Nginx.
 - Réorganisation des scripts, documents, configurations et composants d'authentification.
 - Interface d'initialisation clarifiée et HTML rendu validé par le validateur Nu du W3C.
@@ -32,6 +32,9 @@ Version de développement ciblée : `0.2.0-alpha.1`.
 
 ### Security
 
+- Filtrage du producteur jusque dans les mutations et agrégations SQL des contrôles qualité,
+  recettes, QR codes et liaisons produit-ingrédient.
+- Couverture automatisée de toutes les combinaisons de rôles et d'actions privées.
 - Neutralisation des erreurs internes exposées aux clients.
 - Vérification constante du jeton d'initialisation et simulation Argon2 pour les comptes inconnus.
 - Refus explicite des comptes TOTP tant que leur validation n'est pas implémentée.
