@@ -1,18 +1,24 @@
 use crate::api::AppState;
-use crate::models::user::{LoginRequest, LoginResponse, User, UserProfile};
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
-use chrono::{DateTime, Duration, Utc};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use crate::models::user::{LoginRequest, User};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::convert::Infallible;
-use std::sync::LazyLock;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
+
+mod password;
+mod rate_limit;
+mod tokens;
+
+use password::{hash_password, verify_password, DUMMY_PASSWORD_HASH};
+use rate_limit::{
+    clear_login_failures, login_failure_response, login_is_rate_limited, rate_limit_error,
+};
+use tokens::{
+    build_login_response, decode_claims, decode_token, issue_login_response, refresh_expiry,
+    revoke_session_family,
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,11 +56,6 @@ struct TokenClaims {
     exp: usize,
     iat: usize,
 }
-
-static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
-    hash_password("code-terroir-dummy-password")
-        .expect("the static dummy password must be hashable")
-});
 
 #[derive(Debug, FromRow)]
 struct AuthSession {
@@ -557,147 +558,6 @@ async fn logout_handler(request: RefreshRequest, state: AppState) -> Result<impl
     ))
 }
 
-async fn issue_login_response(
-    user: &User,
-    state: &AppState,
-) -> Result<LoginResponse, TokenIssueError> {
-    let session_id = Uuid::new_v4();
-    let response = build_login_response(user, state, session_id)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO auth_sessions (id, family_id, user_id, expires_at)
-        VALUES ($1, $1, $2, $3)
-        "#,
-    )
-    .bind(session_id)
-    .bind(user.id)
-    .bind(refresh_expiry(state))
-    .execute(&state.db.pool)
-    .await?;
-
-    Ok(response)
-}
-
-fn build_login_response(
-    user: &User,
-    state: &AppState,
-    session_id: Uuid,
-) -> Result<LoginResponse, jsonwebtoken::errors::Error> {
-    let access_token = encode_token(
-        user,
-        "access",
-        state.config.jwt_expiration_hours,
-        &state.config.jwt_secret,
-        session_id,
-    )?;
-    let refresh_token = encode_token(
-        user,
-        "refresh",
-        refresh_validity_hours(state),
-        &state.config.jwt_secret,
-        session_id,
-    )?;
-
-    Ok(LoginResponse {
-        access_token,
-        refresh_token,
-        expires_in: state
-            .config
-            .jwt_expiration_hours
-            .saturating_mul(3600)
-            .min(i64::MAX as u64) as i64,
-        user: UserProfile {
-            id: user.id,
-            email: user.email.clone(),
-            first_name: user.first_name.clone(),
-            last_name: user.last_name.clone(),
-            role: user.role.clone(),
-            producer_id: user.producer_id,
-        },
-    })
-}
-
-fn encode_token(
-    user: &User,
-    token_type: &str,
-    validity_hours: u64,
-    jwt_secret: &str,
-    session_id: Uuid,
-) -> Result<String, jsonwebtoken::errors::Error> {
-    let now = Utc::now();
-    let claims = TokenClaims {
-        sub: user.id.to_string(),
-        jti: session_id.to_string(),
-        producer_id: user.producer_id.to_string(),
-        role: user.role.clone(),
-        token_type: token_type.to_string(),
-        iat: now.timestamp() as usize,
-        exp: (now + Duration::hours(validity_hours.min(i64::MAX as u64) as i64)).timestamp()
-            as usize,
-    };
-
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(jwt_secret.as_bytes()),
-    )
-}
-
-fn refresh_expiry(state: &AppState) -> DateTime<Utc> {
-    Utc::now() + Duration::hours(refresh_validity_hours(state) as i64)
-}
-
-fn refresh_validity_hours(state: &AppState) -> u64 {
-    state
-        .config
-        .jwt_expiration_hours
-        .saturating_mul(24)
-        .min(i64::MAX as u64)
-}
-
-async fn revoke_session_family(
-    family_id: Uuid,
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE family_id = $1",
-    )
-    .bind(family_id)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
-}
-
-fn decode_token(
-    token: &str,
-    expected_type: &str,
-    state: &AppState,
-) -> Result<TokenClaims, warp::reply::WithStatus<warp::reply::Json>> {
-    decode_claims(token, expected_type, &state.config.jwt_secret)
-        .map_err(|_| auth_error("Token invalide", warp::http::StatusCode::UNAUTHORIZED))
-}
-
-fn decode_claims(
-    token: &str,
-    expected_type: &str,
-    jwt_secret: &str,
-) -> Result<TokenClaims, jsonwebtoken::errors::Error> {
-    let decoded = decode::<TokenClaims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret.as_bytes()),
-        &Validation::default(),
-    )?;
-
-    if decoded.claims.token_type != expected_type {
-        return Err(jsonwebtoken::errors::Error::from(
-            jsonwebtoken::errors::ErrorKind::InvalidToken,
-        ));
-    }
-
-    Ok(decoded.claims)
-}
-
 fn bootstrap_token_matches(configured: Option<&str>, provided: Option<&str>) -> bool {
     let (Some(configured), Some(provided)) = (configured, provided) else {
         return false;
@@ -712,120 +572,6 @@ fn bootstrap_token_matches(configured: Option<&str>, provided: Option<&str>) -> 
                 difference | (left ^ right)
             })
             == 0
-}
-
-fn login_attempt_key(email: &str) -> String {
-    let normalized = email.trim().to_lowercase();
-    let digest = Sha256::digest(normalized.as_bytes());
-    format!("auth:login-attempts:{digest:x}")
-}
-
-async fn login_is_rate_limited(email: &str, state: &AppState) -> bool {
-    let key = login_attempt_key(email);
-    let mut connection = state.redis.clone();
-    match redis::cmd("GET")
-        .arg(key)
-        .query_async::<Option<u32>>(&mut connection)
-        .await
-    {
-        Ok(Some(attempts)) => attempts >= state.config.security.max_login_attempts.max(1),
-        Ok(None) => false,
-        Err(error) => {
-            tracing::error!(%error, "Impossible de lire le compteur anti-bruteforce Redis");
-            false
-        }
-    }
-}
-
-async fn record_failed_login(email: &str, state: &AppState) -> u32 {
-    let key = login_attempt_key(email);
-    let lockout_seconds = state
-        .config
-        .security
-        .lockout_duration_minutes
-        .max(1)
-        .saturating_mul(60)
-        .min(i64::MAX as u64) as i64;
-    let mut connection = state.redis.clone();
-    let result = redis::pipe()
-        .atomic()
-        .cmd("INCR")
-        .arg(&key)
-        .cmd("EXPIRE")
-        .arg(&key)
-        .arg(lockout_seconds)
-        .query_async::<(u32, bool)>(&mut connection)
-        .await;
-
-    match result {
-        Ok((attempts, _)) => attempts,
-        Err(error) => {
-            tracing::error!(%error, "Impossible de mettre à jour le compteur anti-bruteforce Redis");
-            0
-        }
-    }
-}
-
-async fn clear_login_failures(email: &str, state: &AppState) {
-    let key = login_attempt_key(email);
-    let mut connection = state.redis.clone();
-    if let Err(error) = redis::cmd("DEL")
-        .arg(key)
-        .query_async::<u32>(&mut connection)
-        .await
-    {
-        tracing::error!(%error, "Impossible de réinitialiser le compteur anti-bruteforce Redis");
-    }
-}
-
-async fn login_failure_response(email: &str, state: &AppState) -> warp::reply::Response {
-    let attempts = record_failed_login(email, state).await;
-    if attempts >= state.config.security.max_login_attempts.max(1) {
-        rate_limit_error(state)
-    } else {
-        auth_error(
-            "Identifiants invalides",
-            warp::http::StatusCode::UNAUTHORIZED,
-        )
-        .into_response()
-    }
-}
-
-fn rate_limit_error(state: &AppState) -> warp::reply::Response {
-    let retry_after_seconds = state
-        .config
-        .security
-        .lockout_duration_minutes
-        .max(1)
-        .saturating_mul(60);
-    warp::reply::with_header(
-        warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Trop de tentatives de connexion",
-                "retry_after_seconds": retry_after_seconds
-            })),
-            warp::http::StatusCode::TOO_MANY_REQUESTS,
-        ),
-        warp::http::header::RETRY_AFTER,
-        retry_after_seconds,
-    )
-    .into_response()
-}
-
-fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|hash| hash.to_string())
-}
-
-fn verify_password(
-    password: &str,
-    password_hash: &str,
-) -> Result<(), argon2::password_hash::Error> {
-    let parsed_hash = PasswordHash::new(password_hash)?;
-    Argon2::default().verify_password(password.as_bytes(), &parsed_hash)
 }
 
 async fn resolve_bootstrap_producer_id(
@@ -944,10 +690,7 @@ fn error_response<E: std::fmt::Display>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bootstrap_token_matches, decode_claims, hash_password, login_attempt_key, verify_password,
-        RegisterRequest, TokenClaims,
-    };
+    use super::{bootstrap_token_matches, decode_claims, RegisterRequest, TokenClaims};
     use jsonwebtoken::{encode, EncodingKey, Header};
 
     #[test]
@@ -960,21 +703,6 @@ mod tests {
             Some("too-short")
         ));
         assert!(!bootstrap_token_matches(None, Some(token)));
-    }
-
-    #[test]
-    fn login_attempt_keys_are_normalized_and_do_not_expose_email_addresses() {
-        let lower = login_attempt_key("admin@example.test");
-        let mixed = login_attempt_key("  Admin@Example.Test ");
-        assert_eq!(lower, mixed);
-        assert!(!lower.contains("admin@example.test"));
-    }
-
-    #[test]
-    fn password_hash_roundtrip_works() {
-        let hash = hash_password("secret123").expect("hash password");
-        verify_password("secret123", &hash).expect("verify password");
-        assert!(verify_password("bad", &hash).is_err());
     }
 
     #[test]
