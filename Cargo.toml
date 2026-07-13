@@ -35,6 +35,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 jsonwebtoken = "9.0"
 argon2 = "0.5"
 rand = "0.8"
+sha2 = "0.10"
 qrcode = "0.14"
 
 # Configuration

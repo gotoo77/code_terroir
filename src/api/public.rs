@@ -79,7 +79,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path::param::<String>()) // slug
         .and(warp::path("visit"))
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(with_state(state.clone()))
         .and_then(record_visit_handler);
 

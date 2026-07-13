@@ -35,6 +35,7 @@ pub struct SecurityConfig {
     pub session_timeout_minutes: u64,
     pub max_login_attempts: u32,
     pub lockout_duration_minutes: u64,
+    pub max_request_body_bytes: u64,
 }
 
 impl Default for SecurityConfig {
@@ -44,7 +45,31 @@ impl Default for SecurityConfig {
             session_timeout_minutes: 480, // 8 heures
             max_login_attempts: 5,
             lockout_duration_minutes: 30,
+            max_request_body_bytes: 1_048_576,
         }
+    }
+}
+
+impl SecurityConfig {
+    fn load() -> Result<Self, Box<dyn std::error::Error>> {
+        let defaults = Self::default();
+        Ok(Self {
+            password_min_length: env::var("PASSWORD_MIN_LENGTH")
+                .unwrap_or_else(|_| defaults.password_min_length.to_string())
+                .parse()?,
+            session_timeout_minutes: env::var("SESSION_TIMEOUT_MINUTES")
+                .unwrap_or_else(|_| defaults.session_timeout_minutes.to_string())
+                .parse()?,
+            max_login_attempts: env::var("MAX_LOGIN_ATTEMPTS")
+                .unwrap_or_else(|_| defaults.max_login_attempts.to_string())
+                .parse()?,
+            lockout_duration_minutes: env::var("LOCKOUT_DURATION_MINUTES")
+                .unwrap_or_else(|_| defaults.lockout_duration_minutes.to_string())
+                .parse()?,
+            max_request_body_bytes: env::var("MAX_REQUEST_BODY_BYTES")
+                .unwrap_or_else(|_| defaults.max_request_body_bytes.to_string())
+                .parse()?,
+        })
     }
 }
 
@@ -107,7 +132,7 @@ impl AppConfig {
                     .unwrap_or_else(|_| "Code Terroir".to_string()),
             },
 
-            security: SecurityConfig::default(),
+            security: SecurityConfig::load()?,
         };
 
         // Créer les répertoires s'ils n'existent pas

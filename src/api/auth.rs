@@ -7,8 +7,10 @@ use argon2::{
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::convert::Infallible;
+use std::sync::LazyLock;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
@@ -49,6 +51,11 @@ struct TokenClaims {
     iat: usize,
 }
 
+static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
+    hash_password("code-terroir-dummy-password")
+        .expect("the static dummy password must be hashable")
+});
+
 #[derive(Debug, FromRow)]
 struct AuthSession {
     user_id: Uuid,
@@ -85,7 +92,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path("login"))
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(with_state(state.clone()))
         .and_then(login_handler);
 
@@ -93,7 +100,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path("register"))
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(warp::header::optional::<String>("x-bootstrap-token"))
         .and(with_state(state.clone()))
         .and_then(register_handler);
@@ -102,7 +109,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path("refresh"))
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(with_state(state.clone()))
         .and_then(refresh_handler);
 
@@ -110,7 +117,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path("logout"))
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(with_state(state))
         .and_then(logout_handler);
 
@@ -181,7 +188,14 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn login_handler(request: LoginRequest, state: AppState) -> Result<impl Reply, Rejection> {
+async fn login_handler(
+    request: LoginRequest,
+    state: AppState,
+) -> Result<warp::reply::Response, Rejection> {
+    if login_is_rate_limited(&request.email, &state).await {
+        return Ok(rate_limit_error(&state));
+    }
+
     let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
         .bind(&request.email)
         .fetch_optional(&state.db.pool)
@@ -189,40 +203,35 @@ async fn login_handler(request: LoginRequest, state: AppState) -> Result<impl Re
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return Ok(auth_error(
-                "Identifiants invalides",
-                warp::http::StatusCode::UNAUTHORIZED,
-            ))
+            let _ = verify_password(&request.password, &DUMMY_PASSWORD_HASH);
+            return Ok(login_failure_response(&request.email, &state).await);
         }
         Err(error) => {
-            return Ok(error_response(
-                "Erreur lors de la lecture de l'utilisateur",
-                error,
-            ))
+            return Ok(
+                error_response("Erreur lors de la lecture de l'utilisateur", error).into_response(),
+            )
         }
     };
 
     if !user.is_active {
-        return Ok(auth_error(
-            "Utilisateur désactivé",
-            warp::http::StatusCode::FORBIDDEN,
-        ));
+        return Ok(login_failure_response(&request.email, &state).await);
     }
 
     if let Err(error) = verify_password(&request.password, &user.password_hash) {
-        tracing::warn!("Échec login pour {}: {}", request.email, error);
-        return Ok(auth_error(
-            "Identifiants invalides",
-            warp::http::StatusCode::UNAUTHORIZED,
-        ));
+        tracing::warn!(%error, "Échec de vérification du mot de passe");
+        return Ok(login_failure_response(&request.email, &state).await);
     }
 
-    if user.totp_enabled && request.totp_code.as_deref().unwrap_or("").trim().is_empty() {
+    if user.totp_enabled {
+        tracing::error!(user_id = %user.id, "Connexion refusée: validation TOTP non implémentée");
         return Ok(auth_error(
-            "Code TOTP requis pour cet utilisateur",
-            warp::http::StatusCode::UNAUTHORIZED,
-        ));
+            "Authentification à deux facteurs temporairement indisponible",
+            warp::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .into_response());
     }
+
+    clear_login_failures(&request.email, &state).await;
 
     if let Err(error) =
         sqlx::query("UPDATE users SET last_login = NOW(), updated_at = NOW() WHERE id = $1")
@@ -233,23 +242,23 @@ async fn login_handler(request: LoginRequest, state: AppState) -> Result<impl Re
         return Ok(error_response(
             "Erreur lors de la mise à jour de la dernière connexion",
             error,
-        ));
+        )
+        .into_response());
     }
 
     let response = match issue_login_response(&user, &state).await {
         Ok(response) => response,
         Err(error) => {
-            return Ok(error_response(
-                "Erreur lors de la génération des jetons",
-                error,
-            ))
+            return Ok(
+                error_response("Erreur lors de la génération des jetons", error).into_response(),
+            )
         }
     };
 
-    Ok(warp::reply::with_status(
-        warp::reply::json(&response),
-        warp::http::StatusCode::OK,
-    ))
+    Ok(
+        warp::reply::with_status(warp::reply::json(&response), warp::http::StatusCode::OK)
+            .into_response(),
+    )
 }
 
 async fn register_handler(
@@ -705,6 +714,105 @@ fn bootstrap_token_matches(configured: Option<&str>, provided: Option<&str>) -> 
             == 0
 }
 
+fn login_attempt_key(email: &str) -> String {
+    let normalized = email.trim().to_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    format!("auth:login-attempts:{digest:x}")
+}
+
+async fn login_is_rate_limited(email: &str, state: &AppState) -> bool {
+    let key = login_attempt_key(email);
+    let mut connection = state.redis.clone();
+    match redis::cmd("GET")
+        .arg(key)
+        .query_async::<Option<u32>>(&mut connection)
+        .await
+    {
+        Ok(Some(attempts)) => attempts >= state.config.security.max_login_attempts.max(1),
+        Ok(None) => false,
+        Err(error) => {
+            tracing::error!(%error, "Impossible de lire le compteur anti-bruteforce Redis");
+            false
+        }
+    }
+}
+
+async fn record_failed_login(email: &str, state: &AppState) -> u32 {
+    let key = login_attempt_key(email);
+    let lockout_seconds = state
+        .config
+        .security
+        .lockout_duration_minutes
+        .max(1)
+        .saturating_mul(60)
+        .min(i64::MAX as u64) as i64;
+    let mut connection = state.redis.clone();
+    let result = redis::pipe()
+        .atomic()
+        .cmd("INCR")
+        .arg(&key)
+        .cmd("EXPIRE")
+        .arg(&key)
+        .arg(lockout_seconds)
+        .query_async::<(u32, bool)>(&mut connection)
+        .await;
+
+    match result {
+        Ok((attempts, _)) => attempts,
+        Err(error) => {
+            tracing::error!(%error, "Impossible de mettre à jour le compteur anti-bruteforce Redis");
+            0
+        }
+    }
+}
+
+async fn clear_login_failures(email: &str, state: &AppState) {
+    let key = login_attempt_key(email);
+    let mut connection = state.redis.clone();
+    if let Err(error) = redis::cmd("DEL")
+        .arg(key)
+        .query_async::<u32>(&mut connection)
+        .await
+    {
+        tracing::error!(%error, "Impossible de réinitialiser le compteur anti-bruteforce Redis");
+    }
+}
+
+async fn login_failure_response(email: &str, state: &AppState) -> warp::reply::Response {
+    let attempts = record_failed_login(email, state).await;
+    if attempts >= state.config.security.max_login_attempts.max(1) {
+        rate_limit_error(state)
+    } else {
+        auth_error(
+            "Identifiants invalides",
+            warp::http::StatusCode::UNAUTHORIZED,
+        )
+        .into_response()
+    }
+}
+
+fn rate_limit_error(state: &AppState) -> warp::reply::Response {
+    let retry_after_seconds = state
+        .config
+        .security
+        .lockout_duration_minutes
+        .max(1)
+        .saturating_mul(60);
+    warp::reply::with_header(
+        warp::reply::with_status(
+            warp::reply::json(&serde_json::json!({
+                "success": false,
+                "error": "Trop de tentatives de connexion",
+                "retry_after_seconds": retry_after_seconds
+            })),
+            warp::http::StatusCode::TOO_MANY_REQUESTS,
+        ),
+        warp::http::header::RETRY_AFTER,
+        retry_after_seconds,
+    )
+    .into_response()
+}
+
 fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -837,8 +945,8 @@ fn error_response<E: std::fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_token_matches, decode_claims, hash_password, verify_password, RegisterRequest,
-        TokenClaims,
+        bootstrap_token_matches, decode_claims, hash_password, login_attempt_key, verify_password,
+        RegisterRequest, TokenClaims,
     };
     use jsonwebtoken::{encode, EncodingKey, Header};
 
@@ -852,6 +960,14 @@ mod tests {
             Some("too-short")
         ));
         assert!(!bootstrap_token_matches(None, Some(token)));
+    }
+
+    #[test]
+    fn login_attempt_keys_are_normalized_and_do_not_expose_email_addresses() {
+        let lower = login_attempt_key("admin@example.test");
+        let mixed = login_attempt_key("  Admin@Example.Test ");
+        assert_eq!(lower, mixed);
+        assert!(!lower.contains("admin@example.test"));
     }
 
     #[test]

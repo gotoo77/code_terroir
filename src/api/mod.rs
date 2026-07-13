@@ -1,5 +1,7 @@
 use redis::aio::ConnectionManager;
+use serde::de::DeserializeOwned;
 use std::convert::Infallible;
+use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
 use crate::config::AppConfig;
@@ -24,6 +26,14 @@ pub struct AppState {
     #[allow(dead_code)]
     pub redis: ConnectionManager,
     pub config: AppConfig,
+}
+
+pub fn json_body<T>(state: AppState) -> impl Filter<Extract = (T,), Error = Rejection> + Clone
+where
+    T: DeserializeOwned + Send,
+{
+    warp::body::content_length_limit(state.config.security.max_request_body_bytes)
+        .and(warp::body::json())
 }
 
 // Routes principales
@@ -58,6 +68,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
 
 // Gestionnaire d'erreurs global
 pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> {
+    let error_id = Uuid::new_v4();
     let code;
     let message;
 
@@ -73,21 +84,33 @@ pub async fn handle_rejection(err: Rejection) -> Result<impl Reply, Infallible> 
     {
         code = warp::http::StatusCode::BAD_REQUEST;
         message = "Invalid request body";
+    } else if err.find::<warp::reject::PayloadTooLarge>().is_some() {
+        code = warp::http::StatusCode::PAYLOAD_TOO_LARGE;
+        message = "Request payload is too large";
+    } else if err.find::<warp::reject::LengthRequired>().is_some() {
+        code = warp::http::StatusCode::LENGTH_REQUIRED;
+        message = "Content-Length header is required";
     } else if err.find::<warp::reject::MethodNotAllowed>().is_some() {
         code = warp::http::StatusCode::METHOD_NOT_ALLOWED;
         message = "Method not allowed";
     } else {
-        tracing::error!("Unhandled rejection: {:?}", err);
+        tracing::error!(error_id = %error_id, rejection = ?err, "Unhandled rejection");
         code = warp::http::StatusCode::INTERNAL_SERVER_ERROR;
         message = "Internal server error";
     }
 
     let json = warp::reply::json(&serde_json::json!({
         "error": message,
-        "code": code.as_u16()
+        "code": code.as_u16(),
+        "error_id": error_id
     }));
 
     let mut response = warp::reply::with_status(json, code).into_response();
+    response.headers_mut().insert(
+        warp::http::HeaderName::from_static("x-request-id"),
+        warp::http::HeaderValue::from_str(&error_id.to_string())
+            .expect("UUID is a valid HTTP header value"),
+    );
     if code == warp::http::StatusCode::UNAUTHORIZED {
         response.headers_mut().insert(
             warp::http::header::WWW_AUTHENTICATE,

@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build API routes
-    let api_routes = api::routes(app_state).with(warp::log("code_terroir::api"));
+    let api_routes = api::routes(app_state);
 
     // Health check route
     let health = warp::path("health").and(warp::get()).map(|| {
@@ -72,9 +72,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             warp::cors()
                 .allow_origins(cors_allowed_origins.iter().map(String::as_str))
                 .allow_headers(vec!["authorization", "content-type"])
+                .expose_headers(vec!["x-request-id", "retry-after"])
                 .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH"]),
         )
-        .with(warp::compression::gzip());
+        .with(warp::reply::with::headers(security_headers()))
+        .with(warp::compression::gzip())
+        .map(add_request_id)
+        .with(warp::log("code_terroir::api"));
 
     let port = config.server_port;
     let addr = ([0, 0, 0, 0], port);
@@ -91,6 +95,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     warp::serve(routes).run(addr).await;
 
     Ok(())
+}
+
+fn security_headers() -> warp::http::HeaderMap {
+    let mut headers = warp::http::HeaderMap::new();
+    headers.insert(
+        warp::http::HeaderName::from_static("x-content-type-options"),
+        warp::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("x-frame-options"),
+        warp::http::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("referrer-policy"),
+        warp::http::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("permissions-policy"),
+        warp::http::HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("content-security-policy"),
+        warp::http::HeaderValue::from_static(
+            "default-src 'none'; img-src 'self' data: http: https:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    headers
+}
+
+fn add_request_id(reply: impl warp::Reply) -> warp::reply::Response {
+    let mut response = reply.into_response();
+    if !response.headers().contains_key("x-request-id") {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        response.headers_mut().insert(
+            warp::http::HeaderName::from_static("x-request-id"),
+            warp::http::HeaderValue::from_str(&request_id)
+                .expect("UUID is a valid HTTP header value"),
+        );
+    }
+    response
 }
 
 /*
@@ -154,7 +198,9 @@ mod tests {
                     .allow_origin("http://localhost:8081")
                     .allow_headers(vec!["authorization", "content-type"])
                     .allow_methods(vec!["GET", "POST"]),
-            );
+            )
+            .with(warp::reply::with::headers(security_headers()))
+            .map(add_request_id);
 
         let response = warp::test::request()
             .path("/missing")
@@ -169,5 +215,17 @@ mod tests {
                 "http://localhost:8081"
             ))
         );
+        assert_eq!(
+            response.headers().get("x-content-type-options"),
+            Some(&warp::http::HeaderValue::from_static("nosniff"))
+        );
+        assert!(response.headers().contains_key("x-request-id"));
+
+        let success = warp::test::request()
+            .path("/available")
+            .reply(&routes)
+            .await;
+        assert_eq!(success.status(), warp::http::StatusCode::OK);
+        assert!(success.headers().contains_key("x-request-id"));
     }
 }

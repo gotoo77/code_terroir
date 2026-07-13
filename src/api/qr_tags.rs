@@ -46,7 +46,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
     let create_qr_tag = api_prefix
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_qr_tag_handler);
@@ -57,7 +57,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
         .and(warp::path("scan"))
         .and(warp::path::param::<String>()) // slug
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(scan_qr_handler);
