@@ -32,6 +32,9 @@ jobs:
           .venv-ci/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt
           echo "$PWD/.venv-ci/bin" >> "$GITHUB_PATH"
 
+      - name: Check version metadata
+        run: ./scripts/checks/version.sh
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -74,4 +77,15 @@ jobs:
         run: docker compose config --quiet
 
       - name: Build application image
-        run: docker build --tag code-terroir:ci .
+        run: |
+          version="$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          build_date="$(git show -s --format=%cI HEAD)"
+          docker build \
+            --build-arg "VERSION=$version" \
+            --build-arg "VCS_REF=$GITHUB_SHA" \
+            --build-arg "BUILD_DATE=$build_date" \
+            --tag "code-terroir:$version" \
+            .
+          docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+            "code-terroir:$version" | grep --fixed-strings --line-regexp "$version"

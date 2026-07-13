@@ -12,6 +12,10 @@ La première version fonctionnelle est figée par le tag `v0.1.0`. Le travail de
 refonte de l'expérience utilisateur est suivi dans le
 [plan de mise en production](docs/PRODUCTION_READINESS_PLAN.md).
 
+La branche de préparation utilise actuellement la version `0.2.0-alpha.1`. Les changements sont
+consignés dans [`CHANGELOG.md`](CHANGELOG.md) et la procédure de release est décrite dans
+[`docs/VERSIONING.md`](docs/VERSIONING.md).
+
 ## Fonctions réellement disponibles
 
 - gestion des producteurs, fournisseurs, ingrédients, recettes et produits ;
@@ -99,6 +103,7 @@ cargo fmt --all -- --check
 cargo test --locked
 ./scripts/checks/clippy.sh
 ./scripts/checks/html.sh
+./scripts/checks/version.sh
 docker compose config --quiet
 docker build -t code-terroir .
 ```
