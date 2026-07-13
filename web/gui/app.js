@@ -99,8 +99,8 @@ async function makeRequest(method, endpoint, body = null) {
 
 async function testAuthLogin() {
     const payload = {
-        email: document.getElementById('auth-email').value.trim() || null,
-        password: document.getElementById('auth-password').value.trim() || null,
+        email: document.getElementById('auth-register-email').value.trim() || null,
+        password: document.getElementById('auth-register-password').value.trim() || null,
         totp_code: null,
     };
     await callApi('response-auth-login', 'POST', '/api/v1/auth/login', payload);
