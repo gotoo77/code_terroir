@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, agent/ui-ux-production-readiness]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
