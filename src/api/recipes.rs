@@ -1,5 +1,7 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use crate::models::recipe::{CreateRecipeRequest, Recipe, RecipeWithDetails, UpdateRecipeRequest};
+use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -13,6 +15,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_recipes_handler);
 
@@ -21,6 +24,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_recipe_handler);
 
@@ -29,6 +33,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_recipe_handler);
 
@@ -37,6 +42,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_recipe_handler);
 
@@ -50,10 +56,14 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_recipes_handler(state: AppState) -> Result<impl Reply, Rejection> {
+async fn list_recipes_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     match sqlx::query_as::<_, Recipe>(
-        "SELECT * FROM recipes ORDER BY producer_id, name, version DESC, created_at DESC",
+        "SELECT * FROM recipes WHERE producer_id = $1 ORDER BY name, version DESC, created_at DESC",
     )
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -78,7 +88,7 @@ async fn list_recipes_handler(state: AppState) -> Result<impl Reply, Rejection> 
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération des recettes",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -86,7 +96,11 @@ async fn list_recipes_handler(state: AppState) -> Result<impl Reply, Rejection> 
     }
 }
 
-async fn get_recipe_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_recipe_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let recipe_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -101,8 +115,9 @@ async fn get_recipe_handler(id: String, state: AppState) -> Result<impl Reply, R
         }
     };
 
-    match sqlx::query_as::<_, Recipe>("SELECT * FROM recipes WHERE id = $1")
+    match sqlx::query_as::<_, Recipe>("SELECT * FROM recipes WHERE id = $1 AND producer_id = $2")
         .bind(recipe_id)
+        .bind(authenticated.producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -131,7 +146,7 @@ async fn get_recipe_handler(id: String, state: AppState) -> Result<impl Reply, R
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération de la recette",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -141,14 +156,15 @@ async fn get_recipe_handler(id: String, state: AppState) -> Result<impl Reply, R
 
 async fn create_recipe_handler(
     create_request: CreateRecipeRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if let Err(response) = ensure_producer_exists(create_request.producer_id, &state).await {
-        return Ok(response);
+    if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
+        return Ok(forbidden());
     }
 
     let recipe_id = Uuid::new_v4();
-    let version = next_recipe_version(create_request.producer_id, &create_request.name, &state)
+    let version = next_recipe_version(authenticated.producer_id, &create_request.name, &state)
         .await
         .unwrap_or(1);
     let ingredients =
@@ -166,7 +182,7 @@ async fn create_recipe_handler(
         "#,
     )
     .bind(recipe_id)
-    .bind(create_request.producer_id)
+    .bind(authenticated.producer_id)
     .bind(create_request.name)
     .bind(version)
     .bind(&ingredients)
@@ -191,7 +207,7 @@ async fn create_recipe_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la création de la recette",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -202,8 +218,12 @@ async fn create_recipe_handler(
 async fn update_recipe_handler(
     id: String,
     update_request: UpdateRecipeRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_write(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let recipe_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -218,10 +238,13 @@ async fn update_recipe_handler(
         }
     };
 
-    let existing_recipe = match sqlx::query_as::<_, Recipe>("SELECT * FROM recipes WHERE id = $1")
-        .bind(recipe_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    let existing_recipe = match sqlx::query_as::<_, Recipe>(
+        "SELECT * FROM recipes WHERE id = $1 AND producer_id = $2",
+    )
+    .bind(recipe_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(recipe)) => recipe,
         Ok(None) => {
@@ -235,11 +258,12 @@ async fn update_recipe_handler(
             ));
         }
         Err(e) => {
+            tracing::error!("Erreur lors de la récupération de la recette: {:?}", e);
             return Ok(warp::reply::with_status(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération de la recette",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ));
@@ -306,14 +330,20 @@ async fn update_recipe_handler(
                 })),
                 warp::http::StatusCode::OK,
             )),
-            Err(e) => Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": "Erreur lors de la création de la nouvelle version",
-                    "details": e.to_string()
-                })),
-                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )),
+            Err(e) => {
+                tracing::error!(
+                    "Erreur lors de la création d'une version de recette: {:?}",
+                    e
+                );
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "success": false,
+                        "error": "Erreur lors de la création de la nouvelle version",
+                        "details": "Erreur interne"
+                    })),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            }
         }
     } else {
         match sqlx::query_as::<_, Recipe>(
@@ -327,7 +357,7 @@ async fn update_recipe_handler(
                 ingredients_detail = $6,
                 etapes_detail = $7,
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND producer_id = $8
             RETURNING *
             "#,
         )
@@ -335,6 +365,7 @@ async fn update_recipe_handler(
         .bind(next_name)
         .bind(&next_ingredients)
         .bind(&next_steps)
+        .bind(authenticated.producer_id)
         .bind(next_notes)
         .bind(&next_ingredients)
         .bind(&next_steps)
@@ -349,44 +380,18 @@ async fn update_recipe_handler(
                 })),
                 warp::http::StatusCode::OK,
             )),
-            Err(e) => Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": "Erreur lors de la mise à jour de la recette",
-                    "details": e.to_string()
-                })),
-                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )),
+            Err(e) => {
+                tracing::error!("Erreur lors de la mise à jour de la recette: {:?}", e);
+                Ok(warp::reply::with_status(
+                    warp::reply::json(&serde_json::json!({
+                        "success": false,
+                        "error": "Erreur lors de la mise à jour de la recette",
+                        "details": "Erreur interne"
+                    })),
+                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            }
         }
-    }
-}
-
-async fn ensure_producer_exists(
-    producer_id: Uuid,
-    state: &AppState,
-) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers WHERE id = $1")
-        .bind(producer_id)
-        .fetch_optional(&state.db.pool)
-        .await
-    {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Producteur introuvable",
-                "details": "Le producer_id fourni n'existe pas"
-            })),
-            warp::http::StatusCode::BAD_REQUEST,
-        )),
-        Err(e) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Erreur interne",
-                "details": e.to_string()
-            })),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
     }
 }
 
@@ -404,4 +409,18 @@ async fn next_recipe_version(
     .await?;
 
     Ok(max_version.unwrap_or(0) + 1)
+}
+
+fn can_write(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Atelier)
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }

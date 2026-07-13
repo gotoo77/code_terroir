@@ -104,7 +104,7 @@ async fn list_qr_tags_handler(state: AppState) -> Result<impl Reply, Rejection> 
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des QR tags",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -163,7 +163,7 @@ async fn get_qr_tag_handler(id: String, state: AppState) -> Result<impl Reply, R
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération du QR tag",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -203,7 +203,7 @@ async fn create_qr_tag_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la vérification du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -258,7 +258,7 @@ async fn create_qr_tag_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la création du QR tag",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -299,7 +299,7 @@ async fn scan_qr_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la recherche du QR code",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -362,7 +362,7 @@ async fn scan_qr_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de l'enregistrement du scan",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -412,7 +412,7 @@ async fn get_qr_analytics_handler(id: String, state: AppState) -> Result<impl Re
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des statistiques",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),

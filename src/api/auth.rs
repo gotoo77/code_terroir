@@ -41,6 +41,12 @@ pub(crate) struct AuthenticationRequired;
 
 impl warp::reject::Reject for AuthenticationRequired {}
 
+#[derive(Debug, Clone)]
+pub struct AuthenticatedUser {
+    pub producer_id: Uuid,
+    pub role: crate::models::user::UserRole,
+}
+
 pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
@@ -79,16 +85,21 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
 pub fn require_access_token(
     state: AppState,
 ) -> impl Filter<Extract = (), Error = Rejection> + Clone {
+    authenticated(state).map(|_| ()).untuple_one()
+}
+
+pub fn authenticated(
+    state: AppState,
+) -> impl Filter<Extract = (AuthenticatedUser,), Error = Rejection> + Clone {
     warp::header::optional::<String>("authorization")
         .and(with_state(state))
         .and_then(validate_access_token)
-        .untuple_one()
 }
 
 async fn validate_access_token(
     authorization: Option<String>,
     state: AppState,
-) -> Result<(), Rejection> {
+) -> Result<AuthenticatedUser, Rejection> {
     let token = authorization
         .as_deref()
         .and_then(|value| value.strip_prefix("Bearer "))
@@ -98,15 +109,32 @@ async fn validate_access_token(
     let claims = decode_claims(token, "access", &state.config.jwt_secret)
         .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
 
-    Uuid::parse_str(&claims.sub)
-        .and_then(|_| Uuid::parse_str(&claims.producer_id))
+    let user_id =
+        Uuid::parse_str(&claims.sub).map_err(|_| warp::reject::custom(AuthenticationRequired))?;
+    let producer_id = Uuid::parse_str(&claims.producer_id)
         .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
-    claims
+    let role = claims
         .role
         .parse::<crate::models::user::UserRole>()
         .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
 
-    Ok(())
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!("Erreur de vérification de session: {:?}", error);
+            warp::reject::custom(AuthenticationRequired)
+        })?
+        .filter(|user| {
+            user.is_active && user.producer_id == producer_id && user.role == claims.role
+        })
+        .ok_or_else(|| warp::reject::custom(AuthenticationRequired))?;
+
+    Ok(AuthenticatedUser {
+        producer_id: user.producer_id,
+        role,
+    })
 }
 
 fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Infallible> + Clone {

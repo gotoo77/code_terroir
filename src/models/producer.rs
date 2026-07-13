@@ -24,23 +24,6 @@ pub struct Producer {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateProducerRequest {
-    pub raison_sociale: String,
-    pub agrement_sanitaire: Option<String>,
-    pub siret: Option<String>,
-    pub adresse: String,
-    pub code_postal: String,
-    pub ville: String,
-    pub pays: String,
-    pub email: String,
-    pub telephone: Option<String>,
-    pub site_web: Option<String>,
-    pub logo_url: Option<String>,
-    pub photo_url: Option<String>,
-    pub categorie_principale: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct UpdateProducerRequest {
     pub raison_sociale: Option<String>,
     pub agrement_sanitaire: Option<String>,

@@ -1,5 +1,7 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use crate::models::supplier::{CreateSupplierRequest, Supplier, UpdateSupplierRequest};
+use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -13,6 +15,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_suppliers_handler);
 
@@ -21,6 +24,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_supplier_handler);
 
@@ -29,6 +33,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_supplier_handler);
 
@@ -37,6 +42,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_supplier_handler);
 
@@ -50,10 +56,16 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_suppliers_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, Supplier>("SELECT * FROM suppliers ORDER BY created_at DESC")
-        .fetch_all(&state.db.pool)
-        .await
+async fn list_suppliers_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, Supplier>(
+        "SELECT * FROM suppliers WHERE producer_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(authenticated.producer_id)
+    .fetch_all(&state.db.pool)
+    .await
     {
         Ok(suppliers) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
@@ -69,7 +81,7 @@ async fn list_suppliers_handler(state: AppState) -> Result<impl Reply, Rejection
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération des fournisseurs",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -77,7 +89,11 @@ async fn list_suppliers_handler(state: AppState) -> Result<impl Reply, Rejection
     }
 }
 
-async fn get_supplier_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_supplier_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let supplier_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -92,10 +108,13 @@ async fn get_supplier_handler(id: String, state: AppState) -> Result<impl Reply,
         }
     };
 
-    match sqlx::query_as::<_, Supplier>("SELECT * FROM suppliers WHERE id = $1")
-        .bind(supplier_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_as::<_, Supplier>(
+        "SELECT * FROM suppliers WHERE id = $1 AND producer_id = $2",
+    )
+    .bind(supplier_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(supplier)) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
@@ -122,7 +141,7 @@ async fn get_supplier_handler(id: String, state: AppState) -> Result<impl Reply,
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération du fournisseur",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -132,38 +151,13 @@ async fn get_supplier_handler(id: String, state: AppState) -> Result<impl Reply,
 
 async fn create_supplier_handler(
     create_request: CreateSupplierRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    let producer_id = create_request.producer_id;
-    let producer_exists = sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers WHERE id = $1")
-        .bind(producer_id)
-        .fetch_optional(&state.db.pool)
-        .await;
-
-    match producer_exists {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": "Producteur introuvable",
-                    "details": "Le producer_id fourni n'existe pas"
-                })),
-                warp::http::StatusCode::BAD_REQUEST,
-            ));
-        }
-        Err(e) => {
-            tracing::error!("Erreur lors de la vérification du producteur: {:?}", e);
-            return Ok(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": "Erreur interne",
-                    "details": e.to_string()
-                })),
-                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-            ));
-        }
+    if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
+        return Ok(forbidden());
     }
+    let producer_id = authenticated.producer_id;
 
     let supplier_id = Uuid::new_v4();
     match sqlx::query_as::<_, Supplier>(
@@ -201,7 +195,7 @@ async fn create_supplier_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la création du fournisseur",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -212,8 +206,12 @@ async fn create_supplier_handler(
 async fn update_supplier_handler(
     id: String,
     update_request: UpdateSupplierRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_write(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let supplier_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -238,7 +236,7 @@ async fn update_supplier_handler(
             certifications = COALESCE($6, certifications),
             documents = COALESCE($7, documents),
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND producer_id = $8
         RETURNING *
         "#,
     )
@@ -249,6 +247,7 @@ async fn update_supplier_handler(
     .bind(&update_request.address)
     .bind(&update_request.certifications)
     .bind(&update_request.documents)
+    .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
     {
@@ -277,10 +276,24 @@ async fn update_supplier_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la mise à jour du fournisseur",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
         }
     }
+}
+
+fn can_write(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Atelier)
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }

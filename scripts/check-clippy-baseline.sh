@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly BASELINE=72
+readonly BASELINE=67
 output="$(mktemp)"
 trap 'rm -f "$output"' EXIT
 

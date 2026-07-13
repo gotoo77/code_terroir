@@ -1,8 +1,10 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use crate::models::product::{
     normalize_allergens, normalize_nutriscore, CreateProductIngredientLink, CreateProductRequest,
     Product, ProductIngredientLink, ProductWithRelations, UpdateProductRequest,
 };
+use crate::models::user::UserRole;
 use sqlx::{Postgres, Transaction};
 use std::convert::Infallible;
 use uuid::Uuid;
@@ -17,6 +19,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_products_handler);
 
@@ -25,6 +28,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_product_handler);
 
@@ -33,6 +37,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_product_handler);
 
@@ -41,6 +46,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_product_handler);
 
@@ -54,10 +60,16 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_products_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, Product>("SELECT * FROM products ORDER BY created_at DESC")
-        .fetch_all(&state.db.pool)
-        .await
+async fn list_products_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, Product>(
+        "SELECT * FROM products WHERE producer_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(authenticated.producer_id)
+    .fetch_all(&state.db.pool)
+    .await
     {
         Ok(products) => {
             let mut enriched_products = Vec::with_capacity(products.len());
@@ -89,14 +101,19 @@ async fn list_products_handler(state: AppState) -> Result<impl Reply, Rejection>
     }
 }
 
-async fn get_product_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_product_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let product_id = match parse_uuid(&id, "ID produit invalide") {
         Ok(uuid) => uuid,
         Err(response) => return Ok(response),
     };
 
-    match sqlx::query_as::<_, Product>("SELECT * FROM products WHERE id = $1")
+    match sqlx::query_as::<_, Product>("SELECT * FROM products WHERE id = $1 AND producer_id = $2")
         .bind(product_id)
+        .bind(authenticated.producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -134,13 +151,20 @@ async fn get_product_handler(id: String, state: AppState) -> Result<impl Reply, 
 
 async fn create_product_handler(
     create_request: CreateProductRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_write_catalog(&authenticated.role) {
+        return Ok(forbidden());
+    }
+    if create_request
+        .producer_id
+        .is_some_and(|producer_id| producer_id != authenticated.producer_id)
+    {
+        return Ok(forbidden());
+    }
     let product_id = Uuid::new_v4();
-    let producer_id = match resolve_producer_id(create_request.producer_id, &state).await {
-        Ok(producer_id) => producer_id,
-        Err(response) => return Ok(response),
-    };
+    let producer_id = authenticated.producer_id;
 
     let mut tx = match state.db.pool.begin().await {
         Ok(tx) => tx,
@@ -214,6 +238,7 @@ async fn create_product_handler(
     let product_ingredients = match sync_product_ingredients(
         product.id,
         create_request.product_ingredients.as_deref(),
+        producer_id,
         &state,
         &mut tx,
     )
@@ -246,21 +271,21 @@ async fn create_product_handler(
 async fn update_product_handler(
     id: String,
     update_request: UpdateProductRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_write_catalog(&authenticated.role) {
+        return Ok(forbidden());
+    }
+    if update_request
+        .producer_id
+        .is_some_and(|producer_id| producer_id != authenticated.producer_id)
+    {
+        return Ok(forbidden());
+    }
     let product_id = match parse_uuid(&id, "ID produit invalide") {
         Ok(uuid) => uuid,
         Err(response) => return Ok(response),
-    };
-
-    let producer_id = match update_request.producer_id {
-        Some(requested_producer_id) => {
-            match resolve_producer_id(Some(requested_producer_id), &state).await {
-                Ok(value) => Some(value),
-                Err(response) => return Ok(response),
-            }
-        }
-        None => None,
     };
 
     let mut tx = match state.db.pool.begin().await {
@@ -298,7 +323,7 @@ async fn update_product_handler(
         SET
             name = COALESCE($2, name),
             category = COALESCE($3, category),
-            producer_id = COALESCE($4, producer_id),
+            producer_id = $4,
             recipe_id = COALESCE($5, recipe_id),
             description_marketing = COALESCE($6, description_marketing),
             ingredients = COALESCE($7, ingredients),
@@ -315,14 +340,14 @@ async fn update_product_handler(
             conseils_utilisation = COALESCE($18, conseils_utilisation),
             infos_legales = COALESCE($19, infos_legales),
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND producer_id = $20
         RETURNING *
         "#,
     )
     .bind(product_id)
     .bind(update_request.name)
     .bind(update_request.category)
-    .bind(producer_id)
+    .bind(authenticated.producer_id)
     .bind(update_request.recipe_id)
     .bind(update_request.description_marketing)
     .bind(ingredients_json)
@@ -338,6 +363,7 @@ async fn update_product_handler(
     .bind(update_request.visuels)
     .bind(update_request.conseils_utilisation)
     .bind(update_request.infos_legales)
+    .bind(authenticated.producer_id)
     .fetch_optional(&mut *tx)
     .await
     {
@@ -362,7 +388,15 @@ async fn update_product_handler(
 
     let product_ingredients = match update_request.product_ingredients.as_deref() {
         Some(links) => {
-            match sync_product_ingredients(product.id, Some(links), &state, &mut tx).await {
+            match sync_product_ingredients(
+                product.id,
+                Some(links),
+                authenticated.producer_id,
+                &state,
+                &mut tx,
+            )
+            .await
+            {
                 Ok(value) => value,
                 Err(response) => return Ok(response),
             }
@@ -426,6 +460,7 @@ async fn fetch_product_ingredients_tx(
 async fn sync_product_ingredients(
     product_id: Uuid,
     links: Option<&[CreateProductIngredientLink]>,
+    producer_id: Uuid,
     state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<Vec<ProductIngredientLink>, warp::reply::WithStatus<warp::reply::Json>> {
@@ -437,7 +472,7 @@ async fn sync_product_ingredients(
             });
     };
 
-    validate_product_ingredient_links(links, state, tx).await?;
+    validate_product_ingredient_links(links, producer_id, state, tx).await?;
 
     if let Err(e) = sqlx::query("DELETE FROM product_ingredients WHERE product_id = $1")
         .bind(product_id)
@@ -488,18 +523,22 @@ async fn sync_product_ingredients(
 
 async fn validate_product_ingredient_links(
     links: &[CreateProductIngredientLink],
-    state: &AppState,
+    producer_id: Uuid,
+    _state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
     for link in links {
-        if let Err(response) = ensure_producer_exists(link.producer_id, state).await {
-            return Err(response);
+        if link.producer_id != producer_id {
+            return Err(forbidden());
         }
 
-        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM ingredients WHERE id = $1")
-            .bind(link.ingredient_id)
-            .fetch_optional(&mut **tx)
-            .await
+        match sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM ingredients WHERE id = $1 AND producer_id = $2",
+        )
+        .bind(link.ingredient_id)
+        .bind(producer_id)
+        .fetch_optional(&mut **tx)
+        .await
         {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -524,6 +563,20 @@ async fn validate_product_ingredient_links(
     Ok(())
 }
 
+fn can_write_catalog(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Atelier)
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
+}
+
 fn parse_uuid(
     value: &str,
     error_message: &str,
@@ -540,54 +593,6 @@ fn parse_uuid(
     })
 }
 
-async fn resolve_producer_id(
-    requested_producer_id: Option<Uuid>,
-    state: &AppState,
-) -> Result<Uuid, warp::reply::WithStatus<warp::reply::Json>> {
-    if let Some(requested_producer_id) = requested_producer_id {
-        ensure_producer_exists(requested_producer_id, state).await?;
-        Ok(requested_producer_id)
-    } else {
-        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers LIMIT 1")
-            .fetch_optional(&state.db.pool)
-            .await
-        {
-            Ok(Some(id)) => Ok(id),
-            Ok(None) => Err(warp::reply::with_status(
-                warp::reply::json(&serde_json::json!({
-                    "success": false,
-                    "error": "Aucun producteur trouvé",
-                    "details": "Vous devez d'abord créer un producteur"
-                })),
-                warp::http::StatusCode::BAD_REQUEST,
-            )),
-            Err(e) => Err(internal_error_response("Erreur interne", e)),
-        }
-    }
-}
-
-async fn ensure_producer_exists(
-    producer_id: Uuid,
-    state: &AppState,
-) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers WHERE id = $1")
-        .bind(producer_id)
-        .fetch_optional(&state.db.pool)
-        .await
-    {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Producteur introuvable",
-                "details": "L'ID du producteur fourni n'existe pas"
-            })),
-            warp::http::StatusCode::BAD_REQUEST,
-        )),
-        Err(e) => Err(internal_error_response("Erreur interne", e)),
-    }
-}
-
 fn internal_error_response<E: std::fmt::Display>(
     error: &str,
     details: E,
@@ -597,8 +602,23 @@ fn internal_error_response<E: std::fmt::Display>(
         warp::reply::json(&serde_json::json!({
             "success": false,
             "error": error,
-            "details": details.to_string()
+            "details": "Erreur interne"
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_write_catalog;
+    use crate::models::user::UserRole;
+
+    #[test]
+    fn catalog_write_permissions_are_explicit() {
+        assert!(can_write_catalog(&UserRole::Admin));
+        assert!(can_write_catalog(&UserRole::Atelier));
+        assert!(!can_write_catalog(&UserRole::Quality));
+        assert!(!can_write_catalog(&UserRole::Logistics));
+        assert!(!can_write_catalog(&UserRole::ReadOnly));
+    }
 }

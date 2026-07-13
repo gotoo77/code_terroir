@@ -1,7 +1,9 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use crate::models::qa_check::{
     CreateQACheckRequest, QACheck, QACheckSummary, QACheckType, QAThresholds, UpdateQACheckRequest,
 };
+use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -18,6 +20,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_checks_handler);
 
@@ -26,6 +29,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_check_handler);
 
@@ -34,6 +38,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_check_handler);
 
@@ -43,6 +48,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("qa"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_batch_checks_handler);
 
@@ -53,6 +59,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_batch_check_handler);
 
@@ -62,6 +69,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("summary"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state))
         .and_then(get_batch_summary_handler);
 
@@ -77,8 +85,14 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_checks_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks ORDER BY checked_at DESC")
+async fn list_checks_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE b.producer_id = $1 ORDER BY q.checked_at DESC",
+    )
+        .bind(authenticated.producer_id)
         .fetch_all(&state.db.pool)
         .await
     {
@@ -94,14 +108,21 @@ async fn list_checks_handler(state: AppState) -> Result<impl Reply, Rejection> {
     }
 }
 
-async fn get_check_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_check_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let check_id = match parse_uuid_param(&id, "ID contrôle qualité invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks WHERE id = $1")
+    match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.id = $1 AND b.producer_id = $2",
+    )
         .bind(check_id)
+        .bind(authenticated.producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -117,16 +138,21 @@ async fn get_check_handler(id: String, state: AppState) -> Result<impl Reply, Re
     }
 }
 
-async fn list_batch_checks_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn list_batch_checks_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
     match sqlx::query_as::<_, QACheck>(
-        "SELECT * FROM qa_checks WHERE batch_id = $1 ORDER BY checked_at DESC, created_at DESC",
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2 ORDER BY q.checked_at DESC, q.created_at DESC",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -146,17 +172,27 @@ async fn list_batch_checks_handler(id: String, state: AppState) -> Result<impl R
 async fn create_batch_check_handler(
     id: String,
     create_request: CreateQACheckRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_create_check(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    if let Err(reply) = ensure_batch_exists(batch_id, &state).await {
+    if let Err(reply) = ensure_batch_exists(batch_id, authenticated.producer_id, &state).await {
         return Ok(reply);
     }
-    if let Err(reply) = ensure_user_exists(create_request.operator_id, &state).await {
+    if let Err(reply) = ensure_user_exists(
+        create_request.operator_id,
+        authenticated.producer_id,
+        &state,
+    )
+    .await
+    {
         return Ok(reply);
     }
 
@@ -233,17 +269,24 @@ async fn create_batch_check_handler(
 async fn update_check_handler(
     id: String,
     update_request: UpdateQACheckRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_update_check(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let check_id = match parse_uuid_param(&id, "ID contrôle qualité invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    let existing = match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks WHERE id = $1")
-        .bind(check_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    let existing = match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.id = $1 AND b.producer_id = $2",
+    )
+    .bind(check_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(check)) => check,
         Ok(None) => return Ok(not_found("Contrôle qualité non trouvé", "qa_check_id", id)),
@@ -310,11 +353,19 @@ async fn update_check_handler(
     }
 }
 
-async fn get_batch_summary_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_batch_summary_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
+
+    if let Err(reply) = ensure_batch_exists(batch_id, authenticated.producer_id, &state).await {
+        return Ok(reply);
+    }
 
     let total_checks =
         match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM qa_checks WHERE batch_id = $1")
@@ -389,10 +440,12 @@ fn parse_uuid_param(
 
 async fn ensure_batch_exists(
     batch_id: Uuid,
+    producer_id: Uuid,
     state: &AppState,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM batches WHERE id = $1")
+    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM batches WHERE id = $1 AND producer_id = $2")
         .bind(batch_id)
+        .bind(producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -411,12 +464,16 @@ async fn ensure_batch_exists(
 
 async fn ensure_user_exists(
     user_id: Uuid,
+    producer_id: Uuid,
     state: &AppState,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM users WHERE id = $1 AND producer_id = $2 AND is_active = true",
+    )
+    .bind(user_id)
+    .bind(producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(warp::reply::with_status(
@@ -451,7 +508,7 @@ fn server_error(
         warp::reply::json(&serde_json::json!({
             "success": false,
             "error": error,
-            "details": source.to_string()
+            "details": "Erreur interne"
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     ))
@@ -466,7 +523,7 @@ fn server_error_reply(
         warp::reply::json(&serde_json::json!({
             "success": false,
             "error": error,
-            "details": source.to_string()
+            "details": "Erreur interne"
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     ))
@@ -490,4 +547,25 @@ fn apply_default_thresholds(check: &mut QACheck, check_type: &QACheckType) {
         }
         _ => {}
     }
+}
+
+fn can_create_check(role: &UserRole) -> bool {
+    matches!(
+        role,
+        UserRole::Admin | UserRole::Quality | UserRole::Atelier
+    )
+}
+
+fn can_update_check(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Quality)
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }

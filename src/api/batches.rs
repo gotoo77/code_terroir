@@ -1,8 +1,10 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use crate::models::batch::{
     generate_lot_code, Batch, BatchState, CreateBatchRequest, RecallBatchRequest,
     UpdateBatchRequest,
 };
+use crate::models::user::UserRole;
 use chrono::Utc;
 use std::convert::Infallible;
 use uuid::Uuid;
@@ -18,6 +20,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_batches_handler);
 
@@ -27,6 +30,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_batch_handler);
 
@@ -36,6 +40,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_batch_handler);
 
@@ -46,6 +51,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_batch_handler);
 
@@ -57,6 +63,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("recall"))
         .and(warp::path::end())
         .and(warp::body::json())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(recall_batch_handler);
 
@@ -73,10 +80,16 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
 }
 
 // Handler pour lister tous les lots
-async fn list_batches_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, Batch>("SELECT * FROM batches ORDER BY production_date DESC")
-        .fetch_all(&state.db.pool)
-        .await
+async fn list_batches_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, Batch>(
+        "SELECT * FROM batches WHERE producer_id = $1 ORDER BY production_date DESC",
+    )
+    .bind(authenticated.producer_id)
+    .fetch_all(&state.db.pool)
+    .await
     {
         Ok(batches) => {
             let response = serde_json::json!({
@@ -94,7 +107,7 @@ async fn list_batches_handler(state: AppState) -> Result<impl Reply, Rejection> 
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des lots",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -105,7 +118,11 @@ async fn list_batches_handler(state: AppState) -> Result<impl Reply, Rejection> 
 }
 
 // Handler pour récupérer un lot par ID
-async fn get_batch_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_batch_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     // Valider que l'ID est un UUID valide
     let batch_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
@@ -122,8 +139,9 @@ async fn get_batch_handler(id: String, state: AppState) -> Result<impl Reply, Re
         }
     };
 
-    match sqlx::query_as::<_, Batch>("SELECT * FROM batches WHERE id = $1")
+    match sqlx::query_as::<_, Batch>("SELECT * FROM batches WHERE id = $1 AND producer_id = $2")
         .bind(batch_id)
+        .bind(authenticated.producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -153,7 +171,7 @@ async fn get_batch_handler(id: String, state: AppState) -> Result<impl Reply, Re
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -166,19 +184,25 @@ async fn get_batch_handler(id: String, state: AppState) -> Result<impl Reply, Re
 // Handler pour créer un nouveau lot
 async fn create_batch_handler(
     create_request: CreateBatchRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_manage_batches(&authenticated.role) {
+        return Ok(forbidden());
+    }
     // Générer un nouvel ID
     let batch_id = Uuid::new_v4();
     let now = Utc::now();
 
-    // Vérifier que le product_id existe
-    match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM products WHERE id = $1)")
-        .bind(&create_request.product_id)
-        .fetch_one(&state.db.pool)
-        .await
+    let producer_id = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT producer_id FROM products WHERE id = $1 AND producer_id = $2",
+    )
+    .bind(create_request.product_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
-        Ok(false) => {
+        Ok(None) => {
             let response = serde_json::json!({
                 "success": false,
                 "error": "Produit non trouvé",
@@ -189,42 +213,20 @@ async fn create_batch_handler(
                 warp::http::StatusCode::BAD_REQUEST,
             ));
         }
+        Ok(Some(producer_id)) => producer_id,
         Err(e) => {
             tracing::error!("Erreur lors de la vérification du produit: {:?}", e);
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la vérification du produit",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ));
         }
-        Ok(true) => {} // Le produit existe, on continue
-    }
-
-    // Récupérer le producer_id depuis le produit
-    let producer_id =
-        match sqlx::query_scalar::<_, Uuid>("SELECT producer_id FROM products WHERE id = $1")
-            .bind(&create_request.product_id)
-            .fetch_one(&state.db.pool)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!("Erreur lors de la récupération du producteur: {:?}", e);
-                let response = serde_json::json!({
-                    "success": false,
-                    "error": "Erreur lors de la récupération du producteur",
-                    "details": e.to_string()
-                });
-                return Ok(warp::reply::with_status(
-                    warp::reply::json(&response),
-                    warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-                ));
-            }
-        };
+    };
 
     // Générer le code de lot si non fourni
     let lot_code = create_request
@@ -281,7 +283,7 @@ async fn create_batch_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la création du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -295,8 +297,12 @@ async fn create_batch_handler(
 async fn update_batch_handler(
     id: String,
     update_request: UpdateBatchRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_manage_batches(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let batch_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -329,7 +335,7 @@ async fn update_batch_handler(
             production_parameters = COALESCE($5, production_parameters),
             notes = COALESCE($6, notes),
             updated_at = NOW()
-        WHERE id = $7
+        WHERE id = $7 AND producer_id = $8
         RETURNING *
         "#,
     )
@@ -340,6 +346,7 @@ async fn update_batch_handler(
     .bind(production_params_json)
     .bind(update_request.notes)
     .bind(&batch_id)
+    .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
     {
@@ -369,7 +376,7 @@ async fn update_batch_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la mise à jour du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -399,14 +406,26 @@ mod tests {
         assert_eq!(json["quantity_produced"], 42);
         assert_eq!(json["production_site"], "Atelier B");
     }
+
+    #[test]
+    fn batch_permissions_separate_operations_and_recall() {
+        assert!(can_manage_batches(&UserRole::Atelier));
+        assert!(!can_manage_batches(&UserRole::ReadOnly));
+        assert!(can_recall_batches(&UserRole::Quality));
+        assert!(!can_recall_batches(&UserRole::Atelier));
+    }
 }
 
 // Handler pour rappeler un lot
 async fn recall_batch_handler(
     id: String,
     recall_request: RecallBatchRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !can_recall_batches(&authenticated.role) {
+        return Ok(forbidden());
+    }
     let batch_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -423,10 +442,11 @@ async fn recall_batch_handler(
     };
 
     match sqlx::query_as::<_, Batch>(
-        "UPDATE batches SET state = 'recalled', recall_reason = $1, recall_date = NOW(), updated_at = NOW() WHERE id = $2 RETURNING *"
+        "UPDATE batches SET state = 'recalled', recall_reason = $1, recall_date = NOW(), updated_at = NOW() WHERE id = $2 AND producer_id = $3 RETURNING *"
     )
     .bind(&recall_request.reason)
     .bind(&batch_id)
+    .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
     {
@@ -457,7 +477,7 @@ async fn recall_batch_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors du rappel du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -465,4 +485,22 @@ async fn recall_batch_handler(
             ))
         }
     }
+}
+
+fn can_manage_batches(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Atelier)
+}
+
+fn can_recall_batches(role: &UserRole) -> bool {
+    matches!(role, UserRole::Admin | UserRole::Quality)
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }

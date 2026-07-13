@@ -136,10 +136,11 @@ async fn get_api_traceability_handler(
             },
         )),
         Err(e) => {
+            tracing::error!("Erreur de lecture de la traçabilité publique: {:?}", e);
             let error_response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des données",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&error_response),
@@ -178,10 +179,11 @@ async fn record_visit_handler(
                 .execute(&state.db.pool)
                 .await
                 {
+                    tracing::error!("Erreur d'enregistrement d'une visite publique: {:?}", error);
                     let response = serde_json::json!({
                         "success": false,
                         "error": "Erreur lors de l'enregistrement de la visite",
-                        "details": error.to_string()
+                        "details": "Erreur interne"
                     });
                     return Ok(warp::reply::with_status(
                         warp::reply::json(&response),
@@ -212,10 +214,11 @@ async fn record_visit_handler(
             }
         }
         Err(e) => {
+            tracing::error!("Erreur de lecture avant enregistrement de visite: {:?}", e);
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de l'enregistrement de la visite",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
