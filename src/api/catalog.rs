@@ -1,4 +1,5 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::{auth, AppState};
 use serde::Serialize;
 use sqlx::FromRow;
 use std::collections::BTreeMap;
@@ -38,7 +39,7 @@ struct CatalogProducerSuggestion {
     producer_phone: Option<String>,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("catalog"))
@@ -49,6 +50,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("ingredients"))
         .and(warp::path::end())
         .and(warp::get())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state))
         .and_then(get_category_catalog_handler)
 }
@@ -59,6 +61,7 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
 
 async fn get_category_catalog_handler(
     category: String,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
     let normalized_category = category.trim().to_ascii_lowercase();
@@ -88,12 +91,16 @@ async fn get_category_catalog_handler(
             p.telephone AS producer_phone
         FROM ingredients i
         INNER JOIN producers p ON p.id = i.producer_id
-        WHERE LOWER(COALESCE(i.category, '')) = $1
-           OR LOWER(COALESCE(p.categorie_principale, '')) = $1
+        WHERE i.producer_id = $2
+          AND (
+            LOWER(COALESCE(i.category, '')) = $1
+            OR LOWER(COALESCE(p.categorie_principale, '')) = $1
+          )
         ORDER BY i.name, p.raison_sociale
         "#,
     )
     .bind(&normalized_category)
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -120,7 +127,7 @@ async fn get_category_catalog_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors du chargement du catalogue",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))

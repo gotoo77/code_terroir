@@ -1,4 +1,6 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
+use crate::api::{auth, AppState};
 use crate::models::qr_tag::{
     generate_unique_slug, CreateQRTagRequest, QRFormat, QRTag, RecordScanRequest,
 };
@@ -18,55 +20,55 @@ struct QRAnalyticsRow {
     scans_this_month: Option<i64>,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("qr"));
 
     // List QR tags
     let list_qr_tags = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_qr_tags_handler);
 
     // Get single QR tag
     let get_qr_tag = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_qr_tag_handler);
 
     // Create QR tag
     let create_qr_tag = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_qr_tag_handler);
 
     // Scan QR code by slug
     let scan_qr = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path("scan"))
         .and(warp::path::param::<String>()) // slug
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(scan_qr_handler);
 
     // Get QR analytics
     let get_qr_analytics = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>()) // qr_tag_id
         .and(warp::path("analytics"))
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_qr_analytics_handler);
 
@@ -83,10 +85,22 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
 }
 
 // Handler pour lister tous les QR tags
-async fn list_qr_tags_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, QRTag>("SELECT * FROM qr_tags ORDER BY created_at DESC")
-        .fetch_all(&state.db.pool)
-        .await
+async fn list_qr_tags_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, QRTag>(
+        r#"
+        SELECT q.*
+        FROM qr_tags q
+        INNER JOIN batches b ON b.id = q.batch_id
+        WHERE b.producer_id = $1
+        ORDER BY q.created_at DESC
+        "#,
+    )
+    .bind(authenticated.producer_id)
+    .fetch_all(&state.db.pool)
+    .await
     {
         Ok(qr_tags) => {
             let response = serde_json::json!({
@@ -104,7 +118,7 @@ async fn list_qr_tags_handler(state: AppState) -> Result<impl Reply, Rejection> 
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des QR tags",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -115,7 +129,11 @@ async fn list_qr_tags_handler(state: AppState) -> Result<impl Reply, Rejection> 
 }
 
 // Handler pour récupérer un QR tag par ID
-async fn get_qr_tag_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_qr_tag_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     // Valider que l'ID est un UUID valide
     let qr_tag_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
@@ -132,10 +150,18 @@ async fn get_qr_tag_handler(id: String, state: AppState) -> Result<impl Reply, R
         }
     };
 
-    match sqlx::query_as::<_, QRTag>("SELECT * FROM qr_tags WHERE id = $1")
-        .bind(qr_tag_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_as::<_, QRTag>(
+        r#"
+        SELECT q.*
+        FROM qr_tags q
+        INNER JOIN batches b ON b.id = q.batch_id
+        WHERE q.id = $1 AND b.producer_id = $2
+        "#,
+    )
+    .bind(qr_tag_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(qr_tag)) => {
             let response = serde_json::json!({
@@ -163,7 +189,7 @@ async fn get_qr_tag_handler(id: String, state: AppState) -> Result<impl Reply, R
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération du QR tag",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -176,16 +202,24 @@ async fn get_qr_tag_handler(id: String, state: AppState) -> Result<impl Reply, R
 // Handler pour créer un nouveau QR tag
 async fn create_qr_tag_handler(
     create_request: CreateQRTagRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !is_allowed(&authenticated.role, Action::ManageQrTags) {
+        return Ok(forbidden());
+    }
+
     // Générer un nouvel ID
     let qr_tag_id = Uuid::new_v4();
 
     // Vérifier que le batch_id existe
-    match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM batches WHERE id = $1)")
-        .bind(&create_request.batch_id)
-        .fetch_one(&state.db.pool)
-        .await
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM batches WHERE id = $1 AND producer_id = $2)",
+    )
+    .bind(create_request.batch_id)
+    .bind(authenticated.producer_id)
+    .fetch_one(&state.db.pool)
+    .await
     {
         Ok(false) => {
             let response = serde_json::json!({
@@ -203,7 +237,7 @@ async fn create_qr_tag_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la vérification du lot",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -232,8 +266,8 @@ async fn create_qr_tag_handler(
         RETURNING *
         "#,
     )
-    .bind(&qr_tag_id)
-    .bind(&create_request.batch_id)
+    .bind(qr_tag_id)
+    .bind(create_request.batch_id)
     .bind(&slug)
     .bind(&short_url)
     .bind(&qr_svg)
@@ -258,7 +292,7 @@ async fn create_qr_tag_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la création du QR tag",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -272,13 +306,20 @@ async fn create_qr_tag_handler(
 async fn scan_qr_handler(
     slug: String,
     scan_request: RecordScanRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
     // Récupérer le QR tag par son slug
     let qr_tag = match sqlx::query_as::<_, QRTag>(
-        "SELECT * FROM qr_tags WHERE slug = $1 AND is_active = true",
+        r#"
+        SELECT q.*
+        FROM qr_tags q
+        INNER JOIN batches b ON b.id = q.batch_id
+        WHERE q.slug = $1 AND q.is_active = true AND b.producer_id = $2
+        "#,
     )
     .bind(&slug)
+    .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
     {
@@ -299,7 +340,7 @@ async fn scan_qr_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la recherche du QR code",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -322,9 +363,9 @@ async fn scan_qr_handler(
         VALUES ($1, $2, $3, $4, $5, $6, NOW())
         "#,
     )
-    .bind(&scan_id)
-    .bind(&qr_tag.id)
-    .bind(&qr_tag.batch_id)
+    .bind(scan_id)
+    .bind(qr_tag.id)
+    .bind(qr_tag.batch_id)
     .bind(ip_addr)
     .bind(&scan_request.user_agent)
     .bind(&scan_request.referer)
@@ -334,9 +375,20 @@ async fn scan_qr_handler(
         Ok(_) => {
             // Incrémenter le compteur de scans
             let _ = sqlx::query(
-                "UPDATE qr_tags SET scan_count = scan_count + 1, last_scanned_at = NOW() WHERE id = $1"
+                r#"
+                UPDATE qr_tags q
+                SET scan_count = scan_count + 1, last_scanned_at = NOW()
+                WHERE q.id = $1
+                  AND EXISTS (
+                      SELECT 1
+                      FROM batches b
+                      WHERE b.id = q.batch_id
+                        AND b.producer_id = $2
+                  )
+                "#,
             )
-            .bind(&qr_tag.id)
+            .bind(qr_tag.id)
+            .bind(authenticated.producer_id)
             .execute(&state.db.pool)
             .await;
 
@@ -362,7 +414,7 @@ async fn scan_qr_handler(
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de l'enregistrement du scan",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -373,7 +425,11 @@ async fn scan_qr_handler(
 }
 
 // Handler pour récupérer les analytics d'un QR tag
-async fn get_qr_analytics_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_qr_analytics_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let qr_tag_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -393,26 +449,40 @@ async fn get_qr_analytics_handler(id: String, state: AppState) -> Result<impl Re
     let stats = match sqlx::query_as::<_, QRAnalyticsRow>(
         r#"
         SELECT
-            COUNT(*) as total_scans,
-            COUNT(DISTINCT ip_address) as unique_scans,
-            COUNT(CASE WHEN scanned_at::date = CURRENT_DATE THEN 1 END) as scans_today,
-            COUNT(CASE WHEN scanned_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as scans_this_week,
-            COUNT(CASE WHEN scanned_at >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as scans_this_month
-        FROM qr_scans
-        WHERE qr_tag_id = $1
+            COUNT(s.id) as total_scans,
+            COUNT(DISTINCT s.ip_address) as unique_scans,
+            COUNT(CASE WHEN s.scanned_at::date = CURRENT_DATE THEN 1 END) as scans_today,
+            COUNT(CASE WHEN s.scanned_at >= CURRENT_DATE - INTERVAL '7 days' THEN 1 END) as scans_this_week,
+            COUNT(CASE WHEN s.scanned_at >= CURRENT_DATE - INTERVAL '30 days' THEN 1 END) as scans_this_month
+        FROM qr_tags q
+        INNER JOIN batches b ON b.id = q.batch_id
+        LEFT JOIN qr_scans s ON s.qr_tag_id = q.id
+        WHERE q.id = $1 AND b.producer_id = $2
+        GROUP BY q.id
         "#,
     )
     .bind(qr_tag_id)
-    .fetch_one(&state.db.pool)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
     .await
     {
-        Ok(stats) => stats,
+        Ok(Some(stats)) => stats,
+        Ok(None) => {
+            let response = serde_json::json!({
+                "success": false,
+                "error": "QR tag non trouvé"
+            });
+            return Ok(warp::reply::with_status(
+                warp::reply::json(&response),
+                warp::http::StatusCode::NOT_FOUND,
+            ));
+        }
         Err(e) => {
             tracing::error!("Erreur lors de la récupération des statistiques: {:?}", e);
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des statistiques",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             return Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -437,6 +507,16 @@ async fn get_qr_analytics_handler(id: String, state: AppState) -> Result<impl Re
         warp::reply::json(&response),
         warp::http::StatusCode::OK,
     ))
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }
 
 fn parse_ip_network(ip: Option<&str>) -> Option<IpNetwork> {
@@ -471,7 +551,7 @@ fn generate_qr_codes(url: &str, format: &QRFormat) -> (Option<String>, Option<Ve
     };
 
     let svg_code = match format {
-        QRFormat::SVG | QRFormat::Both => {
+        QRFormat::Svg | QRFormat::Both => {
             let svg_string = qr_code
                 .render::<svg::Color>()
                 .min_dimensions(200, 200)
@@ -480,11 +560,11 @@ fn generate_qr_codes(url: &str, format: &QRFormat) -> (Option<String>, Option<Ve
                 .build();
             Some(svg_string)
         }
-        QRFormat::PNG => None,
+        QRFormat::Png => None,
     };
 
     let png_bytes = match format {
-        QRFormat::PNG | QRFormat::Both => {
+        QRFormat::Png | QRFormat::Both => {
             // Pour le PNG, on génère une représentation simple en bitmap
             let bitmap = qr_code
                 .render::<qrcode::render::unicode::Dense1x2>()
@@ -496,7 +576,7 @@ fn generate_qr_codes(url: &str, format: &QRFormat) -> (Option<String>, Option<Ve
             // Pour maintenant, on stocke la représentation en tant que bytes UTF-8
             Some(bitmap.into_bytes())
         }
-        QRFormat::SVG => None,
+        QRFormat::Svg => None,
     };
 
     (svg_code, png_bytes)
@@ -505,7 +585,7 @@ fn generate_qr_codes(url: &str, format: &QRFormat) -> (Option<String>, Option<Ve
 // Fonction de fallback pour générer des placeholders en cas d'erreur
 fn generate_qr_placeholders(url: &str, format: &QRFormat) -> (Option<String>, Option<Vec<u8>>) {
     let svg_placeholder = match format {
-        QRFormat::SVG | QRFormat::Both => Some(format!(
+        QRFormat::Svg | QRFormat::Both => Some(format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
                     <rect width="200" height="200" fill="white"/>
                     <rect x="10" y="10" width="180" height="180" fill="black"/>
@@ -522,14 +602,14 @@ fn generate_qr_placeholders(url: &str, format: &QRFormat) -> (Option<String>, Op
                 </svg>"#,
             url
         )),
-        QRFormat::PNG => None,
+        QRFormat::Png => None,
     };
 
     let png_placeholder = match format {
-        QRFormat::PNG | QRFormat::Both => {
+        QRFormat::Png | QRFormat::Both => {
             Some(vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) // PNG header
         }
-        QRFormat::SVG => None,
+        QRFormat::Svg => None,
     };
 
     (svg_placeholder, png_placeholder)
@@ -575,8 +655,24 @@ mod tests {
         );
 
         let (svg_only, png_only) =
-            generate_qr_placeholders("https://ct.local/t/demo", &QRFormat::SVG);
+            generate_qr_placeholders("https://ct.local/t/demo", &QRFormat::Svg);
         assert!(svg_only.is_some());
         assert!(png_only.is_none());
+    }
+
+    #[test]
+    fn qr_format_keeps_the_existing_json_contract() {
+        assert!(matches!(
+            serde_json::from_str::<QRFormat>("\"SVG\"").expect("deserialize SVG"),
+            QRFormat::Svg
+        ));
+        assert!(matches!(
+            serde_json::from_str::<QRFormat>("\"PNG\"").expect("deserialize PNG"),
+            QRFormat::Png
+        ));
+        assert_eq!(
+            serde_json::to_string(&QRFormat::Svg).expect("serialize SVG"),
+            "\"SVG\""
+        );
     }
 }

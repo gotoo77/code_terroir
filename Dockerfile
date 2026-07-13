@@ -1,5 +1,5 @@
 # Build stage
-FROM rustlang/rust:nightly-slim AS builder
+FROM rust:1.90.0-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -23,12 +23,25 @@ COPY Cargo.toml Cargo.lock ./
 # Copy source code
 COPY src ./src
 COPY migrations ./migrations
+COPY config ./config
 
 # Build the application
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim
+
+ARG VERSION=dev
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.title="Code Terroir" \
+      org.opencontainers.image.description="Plateforme de traçabilité pour producteurs artisanaux" \
+      org.opencontainers.image.source="https://github.com/gotoo77/code_terroir" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$VCS_REF" \
+      org.opencontainers.image.created="$BUILD_DATE" \
+      org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
 

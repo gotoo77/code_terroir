@@ -1,6 +1,6 @@
 [package]
 name = "code-terroir"
-version = "0.1.0"
+version = "0.2.0-alpha.2"
 edition = "2021"
 authors = ["Code Terroir Team"]
 description = "Plateforme de traçabilité pour producteurs artisanaux"
@@ -35,10 +35,10 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 jsonwebtoken = "9.0"
 argon2 = "0.5"
 rand = "0.8"
+sha2 = "0.10"
 qrcode = "0.14"
 
 # Configuration
-config = "0.14"
 dotenv = "0.15"
 
 # Logging

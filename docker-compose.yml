@@ -11,7 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U code_terroir"]
+      test: ["CMD-SHELL", "pg_isready -U code_terroir -d code_terroir_dev"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -39,6 +39,8 @@ services:
       DATABASE_URL: ${DOCKER_DATABASE_URL:?DOCKER_DATABASE_URL must be set in .env}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:8081}
       UPLOAD_DIR: /app/uploads
       EXPORT_DIR: /app/exports
     volumes:
@@ -65,10 +67,11 @@ services:
   # Monitoring - Prometheus (optional for dev)
   prometheus:
     image: prom/prometheus:latest
+    profiles: ["monitoring"]
     ports:
       - "9090:9090"
     volumes:
-      - ./ops/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -80,6 +83,7 @@ services:
   # Monitoring - Grafana (optional for dev)
   grafana:
     image: grafana/grafana:latest
+    profiles: ["monitoring"]
     ports:
       - "3000:3000"
     environment:

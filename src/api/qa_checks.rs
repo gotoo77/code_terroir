@@ -1,4 +1,6 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
+use crate::api::{auth, AppState};
 use crate::models::qa_check::{
     CreateQACheckRequest, QACheck, QACheckSummary, QACheckType, QAThresholds, UpdateQACheckRequest,
 };
@@ -6,7 +8,7 @@ use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let qa_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("qa-checks"));
@@ -15,17 +17,17 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("batches"));
 
     let list_checks = qa_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_checks_handler);
 
     let get_check = qa_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_check_handler);
 
@@ -33,26 +35,27 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::put())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_check_handler);
 
     let list_batch_checks = batch_prefix
-        .clone()
         .and(warp::path::param::<String>())
         .and(warp::path("qa"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_batch_checks_handler);
 
     let create_batch_check = batch_prefix
-        .clone()
         .and(warp::path::param::<String>())
         .and(warp::path("qa"))
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_batch_check_handler);
 
@@ -62,6 +65,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path("summary"))
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state))
         .and_then(get_batch_summary_handler);
 
@@ -77,8 +81,14 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_checks_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks ORDER BY checked_at DESC")
+async fn list_checks_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE b.producer_id = $1 ORDER BY q.checked_at DESC",
+    )
+        .bind(authenticated.producer_id)
         .fetch_all(&state.db.pool)
         .await
     {
@@ -94,14 +104,21 @@ async fn list_checks_handler(state: AppState) -> Result<impl Reply, Rejection> {
     }
 }
 
-async fn get_check_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_check_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let check_id = match parse_uuid_param(&id, "ID contrôle qualité invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks WHERE id = $1")
+    match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.id = $1 AND b.producer_id = $2",
+    )
         .bind(check_id)
+        .bind(authenticated.producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -117,16 +134,21 @@ async fn get_check_handler(id: String, state: AppState) -> Result<impl Reply, Re
     }
 }
 
-async fn list_batch_checks_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn list_batch_checks_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
     match sqlx::query_as::<_, QACheck>(
-        "SELECT * FROM qa_checks WHERE batch_id = $1 ORDER BY checked_at DESC, created_at DESC",
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2 ORDER BY q.checked_at DESC, q.created_at DESC",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -146,17 +168,27 @@ async fn list_batch_checks_handler(id: String, state: AppState) -> Result<impl R
 async fn create_batch_check_handler(
     id: String,
     create_request: CreateQACheckRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !is_allowed(&authenticated.role, Action::CreateQualityCheck) {
+        return Ok(forbidden());
+    }
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    if let Err(reply) = ensure_batch_exists(batch_id, &state).await {
+    if let Err(reply) = ensure_batch_exists(batch_id, authenticated.producer_id, &state).await {
         return Ok(reply);
     }
-    if let Err(reply) = ensure_user_exists(create_request.operator_id, &state).await {
+    if let Err(reply) = ensure_user_exists(
+        create_request.operator_id,
+        authenticated.producer_id,
+        &state,
+    )
+    .await
+    {
         return Ok(reply);
     }
 
@@ -233,17 +265,24 @@ async fn create_batch_check_handler(
 async fn update_check_handler(
     id: String,
     update_request: UpdateQACheckRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !is_allowed(&authenticated.role, Action::UpdateQualityCheck) {
+        return Ok(forbidden());
+    }
     let check_id = match parse_uuid_param(&id, "ID contrôle qualité invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    let existing = match sqlx::query_as::<_, QACheck>("SELECT * FROM qa_checks WHERE id = $1")
-        .bind(check_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    let existing = match sqlx::query_as::<_, QACheck>(
+        "SELECT q.* FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.id = $1 AND b.producer_id = $2",
+    )
+    .bind(check_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(check)) => check,
         Ok(None) => return Ok(not_found("Contrôle qualité non trouvé", "qa_check_id", id)),
@@ -284,6 +323,12 @@ async fn update_check_handler(
             notes = $7,
             attachments = $8
         WHERE id = $1
+          AND EXISTS (
+              SELECT 1
+              FROM batches b
+              WHERE b.id = qa_checks.batch_id
+                AND b.producer_id = $9
+          )
         RETURNING *
         "#,
     )
@@ -295,10 +340,11 @@ async fn update_check_handler(
     .bind(updated.unit)
     .bind(updated.notes)
     .bind(updated.attachments)
-    .fetch_one(&state.db.pool)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
     .await
     {
-        Ok(check) => Ok(warp::reply::with_status(
+        Ok(Some(check)) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
                 "success": true,
                 "message": "Contrôle qualité mis à jour avec succès",
@@ -306,19 +352,30 @@ async fn update_check_handler(
             })),
             warp::http::StatusCode::OK,
         )),
+        Ok(None) => Ok(not_found("Contrôle qualité non trouvé", "qa_check_id", id)),
         Err(e) => server_error("Erreur lors de la mise à jour du contrôle qualité", e),
     }
 }
 
-async fn get_batch_summary_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_batch_summary_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let batch_id = match parse_uuid_param(&id, "ID lot invalide") {
         Ok(uuid) => uuid,
         Err(reply) => return Ok(reply),
     };
 
-    let total_checks =
-        match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM qa_checks WHERE batch_id = $1")
+    if let Err(reply) = ensure_batch_exists(batch_id, authenticated.producer_id, &state).await {
+        return Ok(reply);
+    }
+
+    let total_checks = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2",
+    )
             .bind(batch_id)
+            .bind(authenticated.producer_id)
             .fetch_one(&state.db.pool)
             .await
         {
@@ -327,9 +384,10 @@ async fn get_batch_summary_handler(id: String, state: AppState) -> Result<impl R
         };
 
     let compliant_checks = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM qa_checks WHERE batch_id = $1 AND is_compliant = true",
+        "SELECT COUNT(*) FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND q.is_compliant = true AND b.producer_id = $2",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_one(&state.db.pool)
     .await
     {
@@ -338,9 +396,10 @@ async fn get_batch_summary_handler(id: String, state: AppState) -> Result<impl R
     };
 
     let check_types = match sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT check_type FROM qa_checks WHERE batch_id = $1 ORDER BY check_type",
+        "SELECT DISTINCT q.check_type FROM qa_checks q INNER JOIN batches b ON b.id = q.batch_id WHERE q.batch_id = $1 AND b.producer_id = $2 ORDER BY q.check_type",
     )
     .bind(batch_id)
+    .bind(authenticated.producer_id)
     .fetch_all(&state.db.pool)
     .await
     {
@@ -389,10 +448,12 @@ fn parse_uuid_param(
 
 async fn ensure_batch_exists(
     batch_id: Uuid,
+    producer_id: Uuid,
     state: &AppState,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM batches WHERE id = $1")
+    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM batches WHERE id = $1 AND producer_id = $2")
         .bind(batch_id)
+        .bind(producer_id)
         .fetch_optional(&state.db.pool)
         .await
     {
@@ -411,12 +472,16 @@ async fn ensure_batch_exists(
 
 async fn ensure_user_exists(
     user_id: Uuid,
+    producer_id: Uuid,
     state: &AppState,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM users WHERE id = $1 AND producer_id = $2 AND is_active = true",
+    )
+    .bind(user_id)
+    .bind(producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(warp::reply::with_status(
@@ -451,7 +516,7 @@ fn server_error(
         warp::reply::json(&serde_json::json!({
             "success": false,
             "error": error,
-            "details": source.to_string()
+            "details": "Erreur interne"
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     ))
@@ -466,7 +531,7 @@ fn server_error_reply(
         warp::reply::json(&serde_json::json!({
             "success": false,
             "error": error,
-            "details": source.to_string()
+            "details": "Erreur interne"
         })),
         warp::http::StatusCode::INTERNAL_SERVER_ERROR,
     ))
@@ -490,4 +555,14 @@ fn apply_default_thresholds(check: &mut QACheck, check_type: &QACheckType) {
         }
         _ => {}
     }
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
 }

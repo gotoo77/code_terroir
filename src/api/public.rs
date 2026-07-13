@@ -54,7 +54,7 @@ pub struct RecordVisitRequest {
     pub referer: Option<String>,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     // Route principale pour récupérer les informations de traçabilité
     let get_traceability_info = warp::path("t")
         .and(warp::get())
@@ -79,7 +79,7 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::path::param::<String>()) // slug
         .and(warp::path("visit"))
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
         .and(with_state(state.clone()))
         .and_then(record_visit_handler);
 
@@ -136,10 +136,11 @@ async fn get_api_traceability_handler(
             },
         )),
         Err(e) => {
+            tracing::error!("Erreur de lecture de la traçabilité publique: {:?}", e);
             let error_response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de la récupération des données",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&error_response),
@@ -178,10 +179,11 @@ async fn record_visit_handler(
                 .execute(&state.db.pool)
                 .await
                 {
+                    tracing::error!("Erreur d'enregistrement d'une visite publique: {:?}", error);
                     let response = serde_json::json!({
                         "success": false,
                         "error": "Erreur lors de l'enregistrement de la visite",
-                        "details": error.to_string()
+                        "details": "Erreur interne"
                     });
                     return Ok(warp::reply::with_status(
                         warp::reply::json(&response),
@@ -212,10 +214,11 @@ async fn record_visit_handler(
             }
         }
         Err(e) => {
+            tracing::error!("Erreur de lecture avant enregistrement de visite: {:?}", e);
             let response = serde_json::json!({
                 "success": false,
                 "error": "Erreur lors de l'enregistrement de la visite",
-                "details": e.to_string()
+                "details": "Erreur interne"
             });
             Ok(warp::reply::with_status(
                 warp::reply::json(&response),
@@ -256,14 +259,14 @@ async fn get_traceability_data(
     if let Some(qr_tag) = qr_tag {
         // 2. Récupérer le batch
         let batch = sqlx::query_as::<_, Batch>("SELECT * FROM batches WHERE id = $1")
-            .bind(&qr_tag.batch_id)
+            .bind(qr_tag.batch_id)
             .fetch_optional(&state.db.pool)
             .await?;
 
         // 3. Récupérer le produit si le batch existe
         let product = if let Some(ref batch) = batch {
             sqlx::query_as::<_, Product>("SELECT * FROM products WHERE id = $1")
-                .bind(&batch.product_id)
+                .bind(batch.product_id)
                 .fetch_optional(&state.db.pool)
                 .await?
         } else {
@@ -379,6 +382,32 @@ fn compute_macro_distribution(product: &Product) -> Option<Vec<(String, String)>
     ])
 }
 
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+fn product_image_markup(product: &Product) -> String {
+    product
+        .image_url
+        .as_deref()
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(|url| {
+            format!(
+                "<img src=\"{}\" alt=\"{}\">",
+                escape_html(url),
+                escape_html(&product.name)
+            )
+        })
+        .unwrap_or_else(|| {
+            "<div class=\"producer-card\">Visuel produit non renseigné</div>".to_string()
+        })
+}
+
 // Générer une page HTML avec les informations de traçabilité
 fn generate_traceability_html(info: &TraceabilityInfo) -> String {
     if let (Some(product), Some(batch)) = (&info.product, &info.batch) {
@@ -414,14 +443,14 @@ fn generate_traceability_html(info: &TraceabilityInfo) -> String {
             .map(|line| {
                 format!(
                     "<div class=\"producer-card\"><strong>{}</strong><div>{}</div><div>Producteur: {} ({})</div><div>Contact: {}{}</div></div>",
-                    line.ingredient_name,
-                    line.ingredient_category.clone().unwrap_or_else(|| "catégorie non renseignée".to_string()),
-                    line.producer_name,
-                    line.producer_city,
-                    line.producer_email,
+                    escape_html(&line.ingredient_name),
+                    escape_html(line.ingredient_category.as_deref().unwrap_or("catégorie non renseignée")),
+                    escape_html(&line.producer_name),
+                    escape_html(&line.producer_city),
+                    escape_html(&line.producer_email),
                     line.producer_phone
                         .as_ref()
-                        .map(|phone| format!(" · {}", phone))
+                        .map(|phone| format!(" · {}", escape_html(phone)))
                         .unwrap_or_default()
                 )
             })
@@ -433,7 +462,12 @@ fn generate_traceability_html(info: &TraceabilityInfo) -> String {
             product
                 .allergenes
                 .iter()
-                .map(|allergen| format!("<span class=\"label-badge allergen\">{}</span>", allergen))
+                .map(|allergen| {
+                    format!(
+                        "<span class=\"label-badge allergen\">{}</span>",
+                        escape_html(allergen)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("")
         };
@@ -558,45 +592,41 @@ fn generate_traceability_html(info: &TraceabilityInfo) -> String {
 </body>
 </html>
             "#,
-            product.name,
-            product.name,
-            product
-                .image_url
-                .as_ref()
-                .map(|url| format!("<img src=\"{}\" alt=\"{}\">", url, product.name))
-                .unwrap_or_else(|| "<div class=\"producer-card\">Visuel produit non renseigné</div>".to_string()),
+            escape_html(&product.name),
+            escape_html(&product.name),
+            product_image_markup(product),
             product
                 .nutriscore
                 .as_ref()
-                .map(|score| format!("<div class=\"nutriscore\">Nutriscore {}</div>", score))
+                .map(|score| format!("<div class=\"nutriscore\">Nutriscore {}</div>", escape_html(score)))
                 .unwrap_or_default(),
             product.description_marketing.as_ref().map_or("".to_string(), |d|
-                format!("<div class=\"info-item\"><span class=\"label\">Description :</span><span class=\"value\">{}</span></div>", d)
+                format!("<div class=\"info-item\"><span class=\"label\">Description :</span><span class=\"value\">{}</span></div>", escape_html(d))
             ),
             if !product.labels_certifications.is_empty() {
                 format!("<div class=\"info-item\"><span class=\"label\">Labels :</span><div class=\"labels\">{}</div></div>",
                     product.labels_certifications.iter()
-                        .map(|l| format!("<span class=\"label-badge\">{}</span>", l))
+                        .map(|l| format!("<span class=\"label-badge\">{}</span>", escape_html(l)))
                         .collect::<Vec<_>>().join(""))
             } else { "".to_string() },
             product.conseils_utilisation.as_ref().map_or("".to_string(), |c|
-                format!("<div class=\"info-item\"><span class=\"label\">Conseils :</span><span class=\"value\">{}</span></div>", c)
+                format!("<div class=\"info-item\"><span class=\"label\">Conseils :</span><span class=\"value\">{}</span></div>", escape_html(c))
             ),
-            product.name,
-            product.category,
+            escape_html(&product.name),
+            escape_html(&product.category),
             allergen_badges,
             nutrition_rows,
             macro_rows,
             ingredient_rows,
-            batch.lot_code,
-            batch.production_date.format("%d/%m/%Y à %H:%M").to_string(),
-            batch.dluo_ddm.format("%d/%m/%Y").to_string(),
+            escape_html(&batch.lot_code),
+            batch.production_date.format("%d/%m/%Y à %H:%M"),
+            batch.dluo_ddm.format("%d/%m/%Y"),
             batch.quantity_produced,
-            batch.production_site,
+            escape_html(&batch.production_site),
             batch.notes.as_ref().map_or("".to_string(), |n|
-                format!("<div class=\"info-item\"><span class=\"label\">Notes :</span><span class=\"value\">{}</span></div>", n)
+                format!("<div class=\"info-item\"><span class=\"label\">Notes :</span><span class=\"value\">{}</span></div>", escape_html(n))
             ),
-            chrono::Utc::now().format("%d/%m/%Y à %H:%M UTC").to_string()
+            chrono::Utc::now().format("%d/%m/%Y à %H:%M UTC")
         )
     } else {
         generate_error_html("inconnu")
@@ -637,13 +667,23 @@ fn generate_error_html(slug: &str) -> String {
 </body>
 </html>
         "#,
-        slug
+        escape_html(slug)
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_escaping_neutralizes_markup_and_attributes() {
+        assert_eq!(
+            escape_html("<script>alert('xss') & \"more\"</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;) &amp; &quot;more&quot;&lt;/script&gt;"
+        );
+        assert!(!generate_error_html("<img src=x onerror=alert(1)>")
+            .contains("<img src=x onerror=alert(1)>"));
+    }
 
     #[test]
     fn parse_ip_network_supports_plain_addresses() {

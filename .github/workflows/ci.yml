@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Rust, HTML and secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component clippy,rustfmt
+
+      - name: Install HTML validator
+        run: |
+          python3 -m venv .venv-ci
+          .venv-ci/bin/python -m pip install --disable-pip-version-check -r requirements-dev.txt
+          echo "$PWD/.venv-ci/bin" >> "$GITHUB_PATH"
+
+      - name: Check version metadata
+        run: ./scripts/checks/version.sh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run unit tests
+        run: cargo test --locked
+
+      - name: Reject Clippy warnings
+        run: ./scripts/checks/clippy.sh
+
+      - name: Validate rendered HTML
+        run: ./scripts/checks/html.sh
+
+      - name: Scan Git history for secrets
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl --fail --silent --show-error --location --output "$archive" "$base/$archive"
+          curl --fail --silent --show-error --location --output checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $archive$" checksums.txt | sha256sum --check
+          tar -xzf "$archive" gitleaks
+          ./gitleaks git --redact --no-banner
+
+  container:
+    name: Container build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Validate Compose
+        env:
+          POSTGRES_PASSWORD: ci-only
+          DOCKER_DATABASE_URL: postgres://code_terroir:ci-only@postgres:5432/code_terroir_dev
+          JWT_SECRET: ci-only-secret-not-for-production
+          GRAFANA_ADMIN_PASSWORD: ci-only
+        run: docker compose config --quiet
+
+      - name: Build application image
+        run: |
+          version="$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          build_date="$(git show -s --format=%cI HEAD)"
+          docker build \
+            --build-arg "VERSION=$version" \
+            --build-arg "VCS_REF=$GITHUB_SHA" \
+            --build-arg "BUILD_DATE=$build_date" \
+            --tag "code-terroir:$version" \
+            .
+          docker inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+            "code-terroir:$version" | grep --fixed-strings --line-regexp "$version"

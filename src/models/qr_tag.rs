@@ -25,17 +25,14 @@ pub struct CreateQRTagRequest {
     pub format: Option<QRFormat>, // SVG, PNG, ou les deux
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum QRFormat {
-    SVG,
-    PNG,
+    #[serde(rename = "SVG")]
+    Svg,
+    #[serde(rename = "PNG")]
+    Png,
+    #[default]
     Both,
-}
-
-impl Default for QRFormat {
-    fn default() -> Self {
-        QRFormat::Both
-    }
 }
 
 #[allow(dead_code)]

@@ -1,162 +1,155 @@
-# Code Terroir - API Backend
+# Code Terroir
 
-🌱 Plateforme de traçabilité pour producteurs artisanaux
+Plateforme de traçabilité pour producteurs artisanaux, écrite en Rust avec PostgreSQL et Redis.
 
-## Architecture
+> [!WARNING]
+> La version actuelle est une preuve de concept fonctionnelle destinée au développement. Les
+> routes métier exigent désormais un JWT, mais le cloisonnement par producteur, le RBAC complet et
+> la gestion des sessions ne sont pas encore finalisés. Ne déployez pas cette version sur Internet
+> et n'y stockez pas de données réelles.
 
-- **Backend**: Rust + Warp + sqlx + PostgreSQL + Redis
-- **Frontend Admin**: React + Vite + TanStack Query (PWA)
-- **Frontend Atelier**: PWA mobile-first (offline-capable)
-- **Frontend Public**: Pages QR ultra-légères
+La première version fonctionnelle est figée par le tag `v0.1.0`. Le travail de sécurisation et de
+refonte de l'expérience utilisateur est suivi dans le
+[plan de mise en production](docs/PRODUCTION_READINESS_PLAN.md).
 
-## Fonctionnalités
+La branche de préparation utilise actuellement la version `0.2.0-alpha.2`. Les changements sont
+consignés dans [`CHANGELOG.md`](CHANGELOG.md) et la procédure de release est décrite dans
+[`docs/VERSIONING.md`](docs/VERSIONING.md).
 
-- ✅ Gestion des produits et recettes
-- ✅ Traçabilité des lots de production
-- ✅ Contrôles qualité (pH, température, etc.)
-- ✅ Génération de QR codes et liens courts
-- ✅ Pages publiques pour consommateurs
-- ✅ Système de rappels
-- ✅ Analytics des scans
-- ✅ Export PDF des dossiers de lots
-- ✅ Authentification JWT + 2FA
-- ✅ Observabilité (logs, métriques, traces)
+## Fonctions réellement disponibles
 
-## Installation rapide
+- gestion des producteurs, fournisseurs, ingrédients, recettes et produits ;
+- création et suivi de lots de production ;
+- contrôles qualité et rappels de lots ;
+- génération de QR codes et fiche publique de traçabilité ;
+- enregistrement et consultation de statistiques de scans ;
+- authentification JWT appliquée aux routes métier ;
+- interface HTML locale de test pour appeler l'API.
+
+## Limites connues
+
+- l'interface actuelle est un testeur d'API pour développeurs, pas encore l'interface métier cible ;
+- filtrage des données par producteur et permissions par rôle encore incomplets ;
+- jetons de rafraîchissement sans rotation ni révocation ;
+- pas encore de 2FA, PWA, export PDF opérationnel ou mode hors ligne ;
+- pas encore de tests d'intégration ou E2E ;
+- le Compose fourni est réservé au développement local ;
+- observabilité, sauvegardes et procédure de déploiement restent à finaliser.
+
+## Architecture actuelle
+
+- API : Rust 1.90, Warp, SQLx ;
+- données : PostgreSQL 15 et Redis 7 ;
+- interface de test : HTML, CSS, JavaScript et serveur local Python/Jinja2 ;
+- pages publiques : HTML généré par l'API Rust ;
+- environnement local : Docker Compose.
+
+## Démarrage local
 
 ### Prérequis
 
-- Rust 1.75+
-- Docker & Docker Compose
-- PostgreSQL 15+ (si pas Docker)
-- Redis 7+ (si pas Docker)
+- Rust 1.90 ;
+- Python 3.11 ou supérieur ;
+- Docker avec la commande `docker compose`.
 
-### Démarrage avec Docker
+### Installation
 
 ```bash
-# Cloner et configurer
 git clone https://github.com/gotoo77/code_terroir.git
 cd code_terroir
 cp .env.example .env
+```
 
-# Démarrer l'infrastructure
-docker-compose up -d postgres redis
+Remplacez toutes les valeurs `change-me` dans `.env`. Ce fichier est ignoré par Git et ne doit
+jamais être commité.
 
-# Installer sqlx CLI pour les migrations
-cargo install sqlx-cli --no-default-features --features postgres
+### API et dépendances
 
-# Appliquer les migrations
-sqlx migrate run
-
-# Démarrer l'API
+```bash
+docker compose up -d postgres redis
 cargo run
 ```
 
-### URLs de développement
+L'API applique les migrations SQLx au démarrage.
 
-- API: http://localhost:3030
-- Health: http://localhost:3030/health
-- API Docs: http://localhost:3030/api/v1 (TODO: OpenAPI)
-- QR public: http://localhost:3030/t/{slug}
+### Interface de test
 
-## Structure du projet
-
-```
-code-terroir/
-├── src/
-│   ├── api/           # Routes HTTP
-│   ├── auth/          # Authentification JWT
-│   ├── config/        # Configuration
-│   ├── database/      # Pool PostgreSQL
-│   ├── models/        # Structures de données
-│   ├── services/      # Logique métier
-│   ├── qr/           # Génération QR codes
-│   ├── pdf/          # Export PDF
-│   └── utils/        # Utilitaires
-├── migrations/       # Scripts SQL
-├── tests/           # Tests
-└── ops/             # Docker, K8s, etc.
-```
-
-## API
-
-Base: `/api/v1`
-
-### Authentification
-- `POST /auth/login` - Connexion
-- `POST /auth/logout` - Déconnexion
-- `POST /auth/refresh` - Refresh token
-
-### Produits
-- `GET /products` - Liste des produits
-- `POST /products` - Créer un produit
-- `GET /products/{id}` - Détail d'un produit
-- `PUT /products/{id}` - Modifier un produit
-
-### Lots
-- `GET /batches` - Liste des lots
-- `POST /batches` - Créer un lot
-- `GET /batches/{id}` - Détail d'un lot
-- `POST /batches/{id}/qa` - Ajouter contrôle QC
-- `POST /batches/{id}/qr` - Générer QR code
-- `POST /batches/{id}/publish` - Publier le lot
-- `POST /batches/{id}/recall` - Rappeler le lot
-
-### QR & Public
-- `GET /t/{slug}` - Page publique QR (HTML)
-- `GET /api/v1/qr/{slug}` - Données QR (JSON)
-
-## Variables d'environnement
-
-Voir `.env.example` pour la liste complète.
-
-Principales variables :
-- `DATABASE_URL` - Connexion PostgreSQL
-- `REDIS_URL` - Connexion Redis
-- `JWT_SECRET` - Clé secrète JWT (IMPORTANT en prod)
-- `BASE_URL` - URL publique de l'API
-
-## Tests
+Dans un second terminal :
 
 ```bash
-# Tests unitaires
-cargo test
-
-# Tests d'intégration avec base de données
-cargo test --features integration-tests
-
-# Tests E2E
-cargo test --features e2e-tests
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python web/server.py
 ```
 
-## Production
+Adresses locales :
+
+- interface de test : <http://localhost:8081> ;
+- API : <http://localhost:3030> ;
+- état de santé : <http://localhost:3030/health> ;
+- fiche publique : `http://localhost:3030/t/{slug}`.
+
+Le script `./admin.sh start` peut également lancer l'API et l'interface après le démarrage de
+PostgreSQL et Redis.
+
+L'organisation des répertoires et les règles de configuration sont documentées dans
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Vérifications
 
 ```bash
-# Build optimisé
-cargo build --release
-
-# Docker
+cargo fmt --all -- --check
+cargo test --locked
+./scripts/checks/clippy.sh
+./scripts/checks/html.sh
+./scripts/checks/version.sh
+docker compose config --quiet
 docker build -t code-terroir .
-docker run -d --name code-terroir -p 3030:3030 code-terroir
-
-# Avec docker-compose
-docker-compose -f docker-compose.prod.yml up -d
 ```
+
+Clippy est exécuté avec `-D warnings` : aucun avertissement n'est accepté par la CI.
+
+## Configuration
+
+Les variables sont documentées dans [.env.example](.env.example). Les plus importantes sont :
+
+- `DATABASE_URL` et `DOCKER_DATABASE_URL` ;
+- `REDIS_URL` ;
+- `JWT_SECRET` ;
+- `BOOTSTRAP_TOKEN`, jeton aléatoire d'au moins 32 caractères utilisé une seule fois pour créer le
+  premier administrateur ;
+- `CORS_ALLOWED_ORIGINS`, liste d'origines autorisées séparées par des virgules ;
+- `QR_BASE_URL` et `BASE_URL` ;
+- `POSTGRES_PASSWORD` et `GRAFANA_ADMIN_PASSWORD`.
+
+Les allergènes réglementaires, catégories métier et unités sont centralisés dans
+[`config/reference-data.json`](config/reference-data.json). L'application embarque ce référentiel
+par défaut. `REFERENCE_DATA_PATH` permet de charger un autre fichier validé au démarrage, sans
+permettre de retirer les 14 allergènes obligatoires du profil européen.
+
+Les commandes de développement sont regroupées sous `scripts/` :
+
+- `./scripts/dev.sh start` lance l'API et l'interface ;
+- `./scripts/seed-demo.sh` charge les données de démonstration ;
+- `./scripts/install-deps.sh` prépare une machine de développement.
+
+`./admin.sh` reste un raccourci compatible vers `scripts/dev.sh`.
+
+Les secrets doivent être fournis par l'environnement en production, jamais intégrés à une image
+ou au dépôt. L'inscription publique est désactivée après le premier compte et le rôle de ce compte
+est imposé côté serveur. À ce stade, un producteur doit déjà exister en base avant cette
+initialisation ; ce parcours sera remplacé par l'assistant de configuration métier.
+
+## État du projet
+
+- `main` : première version fonctionnelle ;
+- `v0.1.0` : jalon immuable de cette version ;
+- `agent/ui-ux-production-readiness` : sécurisation et refonte en cours.
+
+Les changements sont regroupés dans la
+[PR de mise en production](https://github.com/gotoo77/code_terroir/pull/1).
 
 ## Licence
 
-MIT - Voir [LICENSE](LICENSE)
-
-## Contribuer
-
-1. Fork le projet
-2. Créer une branche feature (`git checkout -b feature/nouvelle-fonctionnalite`)
-3. Commit (`git commit -am 'Ajouter nouvelle fonctionnalité'`)
-4. Push (`git push origin feature/nouvelle-fonctionnalite`)
-5. Créer une Pull Request
-
-## Support
-
-- 📧 Email: contact@code-terroir.com
-- 📖 Documentation: https://docs.code-terroir.com
-- 🐛 Issues: https://github.com/code-terroir/code-terroir/issues
+MIT — voir [LICENSE](LICENSE).

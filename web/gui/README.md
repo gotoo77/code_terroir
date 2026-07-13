@@ -37,4 +37,4 @@ Pour modifier l'interface :
 2. Ajouter des fonctions JS → `app.js`
 3. Ajouter de la structure HTML → `index.html`
 
-Le serveur Python (`serve_gui.py`) charge automatiquement et rend les templates.
+Le serveur Python (`web/server.py`) charge automatiquement et rend les templates.

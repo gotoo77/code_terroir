@@ -4,15 +4,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warp::Filter;
 
 mod api;
-mod auth;
 mod config;
 mod database;
 mod logging;
 mod models;
-mod pdf;
-mod qr;
-mod services;
-mod utils;
 use gwl_logger::{Logger, LoggerConfig};
 use logging::TracingToGwlLayer;
 
@@ -43,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_conn = redis_client.get_connection_manager().await?;
     info!("✅ Redis connection established");
 
+    let cors_allowed_origins = config.cors_allowed_origins.clone();
+
     // Create shared application state
     let app_state = api::AppState {
         db: db_pool,
@@ -51,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build API routes
-    let api_routes = api::routes(app_state).with(warp::log("code_terroir::api"));
+    let api_routes = api::routes(app_state);
 
     // Health check route
     let health = warp::path("health").and(warp::get()).map(|| {
@@ -65,14 +62,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Combine all routes
     let routes = health
         .or(api_routes)
+        .recover(api::handle_rejection)
         .with(
             warp::cors()
-                .allow_any_origin()
+                .allow_origins(cors_allowed_origins.iter().map(String::as_str))
                 .allow_headers(vec!["authorization", "content-type"])
+                .expose_headers(vec!["x-request-id", "retry-after"])
                 .allow_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH"]),
         )
+        .with(warp::reply::with::headers(security_headers()))
         .with(warp::compression::gzip())
-        .recover(api::handle_rejection);
+        .map(add_request_id)
+        .with(warp::log("code_terroir::api"));
 
     let port = config.server_port;
     let addr = ([0, 0, 0, 0], port);
@@ -90,6 +91,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+fn security_headers() -> warp::http::HeaderMap {
+    let mut headers = warp::http::HeaderMap::new();
+    headers.insert(
+        warp::http::HeaderName::from_static("x-content-type-options"),
+        warp::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("x-frame-options"),
+        warp::http::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("referrer-policy"),
+        warp::http::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("permissions-policy"),
+        warp::http::HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert(
+        warp::http::HeaderName::from_static("content-security-policy"),
+        warp::http::HeaderValue::from_static(
+            "default-src 'none'; img-src 'self' data: http: https:; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+        ),
+    );
+    headers
+}
+
+fn add_request_id(reply: impl warp::Reply) -> warp::reply::Response {
+    let mut response = reply.into_response();
+    if !response.headers().contains_key("x-request-id") {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        response.headers_mut().insert(
+            warp::http::HeaderName::from_static("x-request-id"),
+            warp::http::HeaderValue::from_str(&request_id)
+                .expect("UUID is a valid HTTP header value"),
+        );
+    }
+    response
+}
+
 /*
 fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -134,4 +176,51 @@ fn init_tracing() {
         .with(formatting_layer)
         .with(TracingToGwlLayer)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use warp::Filter;
+
+    #[tokio::test]
+    async fn cors_headers_are_added_to_recovered_errors() {
+        let routes = warp::path("available")
+            .map(|| warp::reply::json(&serde_json::json!({"ok": true})))
+            .recover(api::handle_rejection)
+            .with(
+                warp::cors()
+                    .allow_origin("http://localhost:8081")
+                    .allow_headers(vec!["authorization", "content-type"])
+                    .allow_methods(vec!["GET", "POST"]),
+            )
+            .with(warp::reply::with::headers(security_headers()))
+            .map(add_request_id);
+
+        let response = warp::test::request()
+            .path("/missing")
+            .header("origin", "http://localhost:8081")
+            .reply(&routes)
+            .await;
+
+        assert_eq!(response.status(), warp::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers().get("access-control-allow-origin"),
+            Some(&warp::http::HeaderValue::from_static(
+                "http://localhost:8081"
+            ))
+        );
+        assert_eq!(
+            response.headers().get("x-content-type-options"),
+            Some(&warp::http::HeaderValue::from_static("nosniff"))
+        );
+        assert!(response.headers().contains_key("x-request-id"));
+
+        let success = warp::test::request()
+            .path("/available")
+            .reply(&routes)
+            .await;
+        assert_eq!(success.status(), warp::http::StatusCode::OK);
+        assert!(success.headers().contains_key("x-request-id"));
+    }
 }

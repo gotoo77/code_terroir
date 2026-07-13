@@ -1,34 +1,37 @@
-use crate::api::AppState;
+use crate::api::auth::AuthenticatedUser;
+use crate::api::authorization::{is_allowed, Action};
+use crate::api::{auth, AppState};
 use crate::models::ingredient::{CreateIngredientRequest, Ingredient, UpdateIngredientRequest};
+use crate::models::product::normalize_allergens;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("ingredients"));
 
     let list_ingredients = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(list_ingredients_handler);
 
     let get_ingredient = api_prefix
-        .clone()
         .and(warp::get())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(get_ingredient_handler);
 
     let create_ingredient = api_prefix
-        .clone()
         .and(warp::post())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(create_ingredient_handler);
 
@@ -36,7 +39,8 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::put())
         .and(warp::path::param::<String>())
         .and(warp::path::end())
-        .and(warp::body::json())
+        .and(crate::api::json_body(state.clone()))
+        .and(auth::authenticated(state.clone()))
         .and(with_state(state.clone()))
         .and_then(update_ingredient_handler);
 
@@ -50,10 +54,16 @@ fn with_state(state: AppState) -> impl Filter<Extract = (AppState,), Error = Inf
     warp::any().map(move || state.clone())
 }
 
-async fn list_ingredients_handler(state: AppState) -> Result<impl Reply, Rejection> {
-    match sqlx::query_as::<_, Ingredient>("SELECT * FROM ingredients ORDER BY created_at DESC")
-        .fetch_all(&state.db.pool)
-        .await
+async fn list_ingredients_handler(
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
+    match sqlx::query_as::<_, Ingredient>(
+        "SELECT * FROM ingredients WHERE producer_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(authenticated.producer_id)
+    .fetch_all(&state.db.pool)
+    .await
     {
         Ok(ingredients) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
@@ -69,7 +79,7 @@ async fn list_ingredients_handler(state: AppState) -> Result<impl Reply, Rejecti
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération des ingrédients",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -77,7 +87,11 @@ async fn list_ingredients_handler(state: AppState) -> Result<impl Reply, Rejecti
     }
 }
 
-async fn get_ingredient_handler(id: String, state: AppState) -> Result<impl Reply, Rejection> {
+async fn get_ingredient_handler(
+    id: String,
+    authenticated: AuthenticatedUser,
+    state: AppState,
+) -> Result<impl Reply, Rejection> {
     let ingredient_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -92,10 +106,13 @@ async fn get_ingredient_handler(id: String, state: AppState) -> Result<impl Repl
         }
     };
 
-    match sqlx::query_as::<_, Ingredient>("SELECT * FROM ingredients WHERE id = $1")
-        .bind(ingredient_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_as::<_, Ingredient>(
+        "SELECT * FROM ingredients WHERE id = $1 AND producer_id = $2",
+    )
+    .bind(ingredient_id)
+    .bind(authenticated.producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(ingredient)) => Ok(warp::reply::with_status(
             warp::reply::json(&serde_json::json!({
@@ -122,7 +139,7 @@ async fn get_ingredient_handler(id: String, state: AppState) -> Result<impl Repl
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la récupération de l'ingrédient",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -132,19 +149,33 @@ async fn get_ingredient_handler(id: String, state: AppState) -> Result<impl Repl
 
 async fn create_ingredient_handler(
     create_request: CreateIngredientRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
-    if let Err(response) = ensure_producer_exists(create_request.producer_id, &state).await {
-        return Ok(response);
+    if !is_allowed(&authenticated.role, Action::ManageCatalog)
+        || create_request.producer_id != authenticated.producer_id
+    {
+        return Ok(forbidden());
+    }
+    if create_request.category.as_deref().is_some_and(|category| {
+        !state
+            .config
+            .reference_data
+            .contains_ingredient_category(category)
+    }) {
+        return Ok(bad_request("Catégorie d'ingrédient inconnue"));
     }
 
     if let Some(supplier_id) = create_request.supplier_id {
-        if let Err(response) = ensure_supplier_exists(supplier_id, &state).await {
+        if let Err(response) =
+            ensure_supplier_exists(supplier_id, authenticated.producer_id, &state).await
+        {
             return Ok(response);
         }
     }
 
     let ingredient_id = Uuid::new_v4();
+    let allergens = normalize_allergens(create_request.allergens, &state.config.reference_data);
     match sqlx::query_as::<_, Ingredient>(
         r#"
         INSERT INTO ingredients (
@@ -155,10 +186,10 @@ async fn create_ingredient_handler(
         "#,
     )
     .bind(ingredient_id)
-    .bind(create_request.producer_id)
+    .bind(authenticated.producer_id)
     .bind(create_request.name)
     .bind(create_request.category)
-    .bind(create_request.allergens.unwrap_or_default())
+    .bind(allergens)
     .bind(create_request.nutritional_info)
     .bind(create_request.supplier_id)
     .bind(create_request.documents.unwrap_or_default())
@@ -179,7 +210,7 @@ async fn create_ingredient_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la création de l'ingrédient",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -190,8 +221,20 @@ async fn create_ingredient_handler(
 async fn update_ingredient_handler(
     id: String,
     update_request: UpdateIngredientRequest,
+    authenticated: AuthenticatedUser,
     state: AppState,
 ) -> Result<impl Reply, Rejection> {
+    if !is_allowed(&authenticated.role, Action::ManageCatalog) {
+        return Ok(forbidden());
+    }
+    if update_request.category.as_deref().is_some_and(|category| {
+        !state
+            .config
+            .reference_data
+            .contains_ingredient_category(category)
+    }) {
+        return Ok(bad_request("Catégorie d'ingrédient inconnue"));
+    }
     let ingredient_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -207,10 +250,16 @@ async fn update_ingredient_handler(
     };
 
     if let Some(supplier_id) = update_request.supplier_id {
-        if let Err(response) = ensure_supplier_exists(supplier_id, &state).await {
+        if let Err(response) =
+            ensure_supplier_exists(supplier_id, authenticated.producer_id, &state).await
+        {
             return Ok(response);
         }
     }
+
+    let allergens = update_request
+        .allergens
+        .map(|allergens| normalize_allergens(Some(allergens), &state.config.reference_data));
 
     match sqlx::query_as::<_, Ingredient>(
         r#"
@@ -223,17 +272,18 @@ async fn update_ingredient_handler(
             supplier_id = COALESCE($6, supplier_id),
             documents = COALESCE($7, documents),
             updated_at = NOW()
-        WHERE id = $1
+        WHERE id = $1 AND producer_id = $8
         RETURNING *
         "#,
     )
     .bind(ingredient_id)
     .bind(update_request.name)
     .bind(update_request.category)
-    .bind(update_request.allergens)
+    .bind(allergens)
     .bind(update_request.nutritional_info)
     .bind(update_request.supplier_id)
     .bind(update_request.documents)
+    .bind(authenticated.producer_id)
     .fetch_optional(&state.db.pool)
     .await
     {
@@ -262,7 +312,7 @@ async fn update_ingredient_handler(
                 warp::reply::json(&serde_json::json!({
                     "success": false,
                     "error": "Erreur lors de la mise à jour de l'ingrédient",
-                    "details": e.to_string()
+                    "details": "Erreur interne"
                 })),
                 warp::http::StatusCode::INTERNAL_SERVER_ERROR,
             ))
@@ -270,43 +320,18 @@ async fn update_ingredient_handler(
     }
 }
 
-async fn ensure_producer_exists(
+async fn ensure_supplier_exists(
+    supplier_id: Uuid,
     producer_id: Uuid,
     state: &AppState,
 ) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers WHERE id = $1")
-        .bind(producer_id)
-        .fetch_optional(&state.db.pool)
-        .await
-    {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Producteur introuvable",
-                "details": "Le producer_id fourni n'existe pas"
-            })),
-            warp::http::StatusCode::BAD_REQUEST,
-        )),
-        Err(e) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Erreur interne",
-                "details": e.to_string()
-            })),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
-    }
-}
-
-async fn ensure_supplier_exists(
-    supplier_id: Uuid,
-    state: &AppState,
-) -> Result<(), warp::reply::WithStatus<warp::reply::Json>> {
-    match sqlx::query_scalar::<_, Uuid>("SELECT id FROM suppliers WHERE id = $1")
-        .bind(supplier_id)
-        .fetch_optional(&state.db.pool)
-        .await
+    match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM suppliers WHERE id = $1 AND producer_id = $2",
+    )
+    .bind(supplier_id)
+    .bind(producer_id)
+    .fetch_optional(&state.db.pool)
+    .await
     {
         Ok(Some(_)) => Ok(()),
         Ok(None) => Err(warp::reply::with_status(
@@ -317,13 +342,36 @@ async fn ensure_supplier_exists(
             })),
             warp::http::StatusCode::BAD_REQUEST,
         )),
-        Err(e) => Err(warp::reply::with_status(
-            warp::reply::json(&serde_json::json!({
-                "success": false,
-                "error": "Erreur interne",
-                "details": e.to_string()
-            })),
-            warp::http::StatusCode::INTERNAL_SERVER_ERROR,
-        )),
+        Err(e) => {
+            tracing::error!("Erreur lors de la vérification du fournisseur: {:?}", e);
+            Err(warp::reply::with_status(
+                warp::reply::json(&serde_json::json!({
+                    "success": false,
+                    "error": "Erreur interne",
+                    "details": "Erreur interne"
+                })),
+                warp::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     }
+}
+
+fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": "Action non autorisée"
+        })),
+        warp::http::StatusCode::FORBIDDEN,
+    )
+}
+
+fn bad_request(error: &str) -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": error
+        })),
+        warp::http::StatusCode::BAD_REQUEST,
+    )
 }

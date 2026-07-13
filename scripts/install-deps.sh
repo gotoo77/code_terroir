@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 #
-# install_deps.sh — installe les dépendances et initialise PostgreSQL pour Code Terroir
+# install-deps.sh — installe les dépendances et initialise PostgreSQL pour Code Terroir
 #
 
 set -e
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
 
 DB_USER="${DB_USER:-code_terroir}"
 DB_PASS="${DB_PASS:?Définissez DB_PASS avant de lancer ce script}"
@@ -99,12 +102,11 @@ SQL
 echo "✅ Base et utilisateur PostgreSQL configurés :"
 echo "   → utilisateur : $DB_USER"
 echo "   → base        : $DB_NAME"
-echo "   → mot de passe: $DB_PASS"
 
 # Vérification
-PG_CONN="postgresql://$DB_USER:$DB_PASS@localhost:5432/$DB_NAME"
 echo "🔍 Test de connexion :"
-psql "$PG_CONN" -c "SELECT '✅ Connexion réussie à $DB_NAME';"
+PGPASSWORD="$DB_PASS" psql -h localhost -U "$DB_USER" -d "$DB_NAME" \
+    -c "SELECT '✅ Connexion réussie à $DB_NAME';"
 
 echo "────────────────────────────────────────────"
 echo "🧱 (Optionnel) Migration SQLx si disponible…"
@@ -124,9 +126,9 @@ echo "🌾 Installation terminée !"
 echo ""
 echo "➡️  PostgreSQL : sudo systemctl status $PG_SERVICE"
 echo "➡️  Redis       : sudo systemctl status redis"
-echo "➡️  Test DB     : psql $PG_CONN"
+echo "➡️  Test DB     : psql -h localhost -U $DB_USER -d $DB_NAME"
 echo ""
 echo "Vous pouvez maintenant exécuter :"
-echo "   ./admin.sh start"
+echo "   ./scripts/dev.sh start"
 echo "ou"
 echo "   cargo run"
