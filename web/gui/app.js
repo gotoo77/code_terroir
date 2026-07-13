@@ -107,8 +107,17 @@ async function testAuthLogin() {
 }
 
 async function testAuthRegister() {
+    const producerFields = {
+        raison_sociale: document.getElementById('auth-producer-name').value.trim(),
+        adresse: document.getElementById('auth-producer-address').value.trim(),
+        code_postal: document.getElementById('auth-producer-postal-code').value.trim(),
+        ville: document.getElementById('auth-producer-city').value.trim(),
+        pays: document.getElementById('auth-producer-country').value.trim() || 'France',
+    };
+    const hasProducerDetails = Object.values(producerFields).some((value) => value.length > 0);
     const payload = {
         producer_id: document.getElementById('auth-producer-id').value.trim() || null,
+        producer: hasProducerDetails ? producerFields : null,
         email: document.getElementById('auth-email').value.trim() || null,
         password: document.getElementById('auth-password').value.trim() || null,
         first_name: document.getElementById('auth-first-name').value.trim() || null,

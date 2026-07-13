@@ -16,10 +16,21 @@ use warp::{Filter, Rejection, Reply};
 #[serde(deny_unknown_fields)]
 struct RegisterRequest {
     producer_id: Option<Uuid>,
+    producer: Option<BootstrapProducerRequest>,
     email: String,
     password: String,
     first_name: String,
     last_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapProducerRequest {
+    raison_sociale: String,
+    adresse: String,
+    code_postal: String,
+    ville: String,
+    pays: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,11 +277,6 @@ async fn register_handler(
         ));
     }
 
-    let producer_id = match resolve_producer_id(request.producer_id, &state).await {
-        Ok(producer_id) => producer_id,
-        Err(response) => return Ok(response),
-    };
-
     let password_hash = match hash_password(&request.password) {
         Ok(hash) => hash,
         Err(error) => return Ok(error_response("Erreur lors du hash du mot de passe", error)),
@@ -301,6 +307,18 @@ async fn register_handler(
         }
         Err(error) => return Ok(error_response("Erreur lors de l'initialisation", error)),
     }
+
+    let producer_id = match resolve_bootstrap_producer_id(
+        request.producer_id,
+        request.producer.as_ref(),
+        &request.email,
+        &mut transaction,
+    )
+    .await
+    {
+        Ok(producer_id) => producer_id,
+        Err(response) => return Ok(response),
+    };
 
     let user_id = Uuid::new_v4();
     let user = match sqlx::query_as::<_, User>(
@@ -702,14 +720,16 @@ fn verify_password(
     Argon2::default().verify_password(password.as_bytes(), &parsed_hash)
 }
 
-async fn resolve_producer_id(
+async fn resolve_bootstrap_producer_id(
     requested_producer_id: Option<Uuid>,
-    state: &AppState,
+    requested_producer: Option<&BootstrapProducerRequest>,
+    user_email: &str,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<Uuid, warp::reply::WithStatus<warp::reply::Json>> {
     if let Some(producer_id) = requested_producer_id {
         match sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers WHERE id = $1")
             .bind(producer_id)
-            .fetch_optional(&state.db.pool)
+            .fetch_optional(&mut **transaction)
             .await
         {
             Ok(Some(_)) => Ok(producer_id),
@@ -722,23 +742,64 @@ async fn resolve_producer_id(
                 error,
             )),
         }
+    } else if let Some(producer_id) =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM producers ORDER BY created_at ASC LIMIT 1")
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|error| error_response("Erreur lors de la recherche de producteur", error))?
+    {
+        Ok(producer_id)
     } else {
-        match sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM producers ORDER BY created_at ASC LIMIT 1",
-        )
-        .fetch_optional(&state.db.pool)
-        .await
-        {
-            Ok(Some(producer_id)) => Ok(producer_id),
-            Ok(None) => Err(auth_error(
-                "Aucun producteur disponible",
+        let Some(producer) = requested_producer else {
+            return Err(auth_error(
+                "Les informations de l'exploitation sont requises pour la première inscription",
                 warp::http::StatusCode::BAD_REQUEST,
-            )),
-            Err(error) => Err(error_response(
-                "Erreur lors de la recherche de producteur",
-                error,
-            )),
+            ));
+        };
+
+        if [
+            producer.raison_sociale.as_str(),
+            producer.adresse.as_str(),
+            producer.code_postal.as_str(),
+            producer.ville.as_str(),
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        {
+            return Err(auth_error(
+                "Les informations de l'exploitation sont incomplètes",
+                warp::http::StatusCode::BAD_REQUEST,
+            ));
         }
+
+        let producer_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO producers (
+                id, raison_sociale, adresse, code_postal, ville, pays, email
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(producer_id)
+        .bind(producer.raison_sociale.trim())
+        .bind(producer.adresse.trim())
+        .bind(producer.code_postal.trim())
+        .bind(producer.ville.trim())
+        .bind(
+            producer
+                .pays
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("France"),
+        )
+        .bind(user_email.trim())
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| error_response("Erreur lors de la création du producteur", error))?;
+
+        Ok(producer_id)
     }
 }
 
@@ -812,6 +873,30 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<RegisterRequest>(request).is_err());
+    }
+
+    #[test]
+    fn registration_accepts_first_producer_details() {
+        let request = serde_json::json!({
+            "producer_id": null,
+            "producer": {
+                "raison_sociale": "Ferme des Trois Chênes",
+                "adresse": "12 chemin des Prés",
+                "code_postal": "47000",
+                "ville": "Agen",
+                "pays": "France"
+            },
+            "email": "admin@example.test",
+            "password": "a-long-password",
+            "first_name": "Ada",
+            "last_name": "Lovelace"
+        });
+
+        let request =
+            serde_json::from_value::<RegisterRequest>(request).expect("deserialize registration");
+        let producer = request.producer.expect("bootstrap producer details");
+        assert_eq!(producer.raison_sociale, "Ferme des Trois Chênes");
+        assert_eq!(producer.ville, "Agen");
     }
 
     #[test]
