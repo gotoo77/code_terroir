@@ -27,19 +27,19 @@ pub struct AppState {
 }
 
 // Routes principales
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
-    let auth_routes = auth::routes(state.clone());
-    let product_routes = products::routes(state.clone());
-    let producer_routes = producers::routes(state.clone());
-    let supplier_routes = suppliers::routes(state.clone());
-    let ingredient_routes = ingredients::routes(state.clone());
-    let catalog_routes = catalog::routes(state.clone());
-    let qa_check_routes = qa_checks::routes(state.clone());
-    let recipe_routes = recipes::routes(state.clone());
-    let batch_routes = batches::routes(state.clone());
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
+    let auth_routes = auth::routes(state.clone()).boxed();
+    let product_routes = products::routes(state.clone()).boxed();
+    let producer_routes = producers::routes(state.clone()).boxed();
+    let supplier_routes = suppliers::routes(state.clone()).boxed();
+    let ingredient_routes = ingredients::routes(state.clone()).boxed();
+    let catalog_routes = catalog::routes(state.clone()).boxed();
+    let qa_check_routes = qa_checks::routes(state.clone()).boxed();
+    let recipe_routes = recipes::routes(state.clone()).boxed();
+    let batch_routes = batches::routes(state.clone()).boxed();
     // let qr_routes = qr::routes(state.clone());  // Obsolète
-    let qr_tag_routes = qr_tags::routes(state.clone());
-    let public_routes = public::routes(state.clone());
+    let qr_tag_routes = qr_tags::routes(state.clone()).boxed();
+    let public_routes = public::routes(state.clone()).boxed();
 
     let private_routes = product_routes
         .or(producer_routes)
@@ -50,9 +50,10 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .or(recipe_routes)
         .or(batch_routes)
         // .or(qr_routes)  // Obsolète
-        .or(qr_tag_routes);
+        .or(qr_tag_routes)
+        .boxed();
 
-    auth_routes.or(public_routes).or(private_routes)
+    auth_routes.or(public_routes).or(private_routes).boxed()
 }
 
 // Gestionnaire d'erreurs global

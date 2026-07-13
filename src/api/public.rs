@@ -54,7 +54,7 @@ pub struct RecordVisitRequest {
     pub referer: Option<String>,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     // Route principale pour récupérer les informations de traçabilité
     let get_traceability_info = warp::path("t")
         .and(warp::get())

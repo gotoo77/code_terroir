@@ -4,9 +4,10 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
@@ -29,11 +30,28 @@ struct RefreshRequest {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TokenClaims {
     sub: String,
+    jti: String,
     producer_id: String,
     role: String,
     token_type: String,
     exp: usize,
     iat: usize,
+}
+
+#[derive(Debug, FromRow)]
+struct AuthSession {
+    user_id: Uuid,
+    family_id: Uuid,
+    expires_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TokenIssueError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("JWT error: {0}")]
+    Jwt(#[from] jsonwebtoken::errors::Error),
 }
 
 #[derive(Debug)]
@@ -47,7 +65,7 @@ pub struct AuthenticatedUser {
     pub role: crate::models::user::UserRole,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("auth"));
@@ -74,10 +92,18 @@ pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Reje
         .and(warp::post())
         .and(warp::path::end())
         .and(warp::body::json())
-        .and(with_state(state))
+        .and(with_state(state.clone()))
         .and_then(refresh_handler);
 
-    login.or(register).or(refresh)
+    let logout = api_prefix
+        .and(warp::path("logout"))
+        .and(warp::post())
+        .and(warp::path::end())
+        .and(warp::body::json())
+        .and(with_state(state))
+        .and_then(logout_handler);
+
+    login.or(register).or(refresh).or(logout).boxed()
 }
 
 pub fn authenticated(
@@ -103,6 +129,8 @@ async fn validate_access_token(
 
     let user_id =
         Uuid::parse_str(&claims.sub).map_err(|_| warp::reject::custom(AuthenticationRequired))?;
+    let session_id =
+        Uuid::parse_str(&claims.jti).map_err(|_| warp::reject::custom(AuthenticationRequired))?;
     let producer_id = Uuid::parse_str(&claims.producer_id)
         .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
     let role = claims
@@ -110,18 +138,27 @@ async fn validate_access_token(
         .parse::<crate::models::user::UserRole>()
         .map_err(|_| warp::reject::custom(AuthenticationRequired))?;
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await
-        .map_err(|error| {
-            tracing::error!("Erreur de vérification de session: {:?}", error);
-            warp::reject::custom(AuthenticationRequired)
-        })?
-        .filter(|user| {
-            user.is_active && user.producer_id == producer_id && user.role == claims.role
-        })
-        .ok_or_else(|| warp::reject::custom(AuthenticationRequired))?;
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        SELECT u.*
+        FROM users u
+        INNER JOIN auth_sessions s ON s.user_id = u.id
+        WHERE u.id = $1
+          AND s.id = $2
+          AND s.revoked_at IS NULL
+          AND s.expires_at > NOW()
+        "#,
+    )
+    .bind(user_id)
+    .bind(session_id)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!("Erreur de vérification de session: {:?}", error);
+        warp::reject::custom(AuthenticationRequired)
+    })?
+    .filter(|user| user.is_active && user.producer_id == producer_id && user.role == claims.role)
+    .ok_or_else(|| warp::reject::custom(AuthenticationRequired))?;
 
     Ok(AuthenticatedUser {
         producer_id: user.producer_id,
@@ -188,7 +225,7 @@ async fn login_handler(request: LoginRequest, state: AppState) -> Result<impl Re
         ));
     }
 
-    let response = match build_login_response(&user, &state) {
+    let response = match issue_login_response(&user, &state).await {
         Ok(response) => response,
         Err(error) => {
             return Ok(error_response(
@@ -293,7 +330,7 @@ async fn register_handler(
         return Ok(error_response("Erreur lors de l'initialisation", error));
     }
 
-    let response = match build_login_response(&user, &state) {
+    let response = match issue_login_response(&user, &state).await {
         Ok(response) => response,
         Err(error) => {
             return Ok(error_response(
@@ -328,22 +365,75 @@ async fn refresh_handler(
         }
     };
 
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db.pool)
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
+    let session_id = match Uuid::parse_str(&claims.jti) {
+        Ok(session_id) => session_id,
+        Err(_) => {
             return Ok(auth_error(
-                "Utilisateur introuvable",
+                "Token invalide",
                 warp::http::StatusCode::UNAUTHORIZED,
             ))
         }
+    };
+
+    let mut transaction = match state.db.pool.begin().await {
+        Ok(transaction) => transaction,
         Err(error) => return Ok(error_response("Erreur lors du refresh token", error)),
     };
 
-    let response = match build_login_response(&user, &state) {
+    let session = match sqlx::query_as::<_, AuthSession>(
+        r#"
+        SELECT user_id, family_id, expires_at, revoked_at
+        FROM auth_sessions
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    {
+        Ok(Some(session)) => session,
+        Ok(None) => return Ok(invalid_token()),
+        Err(error) => return Ok(error_response("Erreur lors du refresh token", error)),
+    };
+
+    if session.user_id != user_id
+        || session.revoked_at.is_some()
+        || session.expires_at <= Utc::now()
+    {
+        if let Err(error) = revoke_session_family(session.family_id, &mut transaction).await {
+            return Ok(error_response(
+                "Erreur lors de la révocation de session",
+                error,
+            ));
+        }
+        if let Err(error) = transaction.commit().await {
+            return Ok(error_response(
+                "Erreur lors de la révocation de session",
+                error,
+            ));
+        }
+        return Ok(invalid_token());
+    }
+
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+    {
+        Ok(Some(user))
+            if user.is_active
+                && user.producer_id.to_string() == claims.producer_id
+                && user.role == claims.role =>
+        {
+            user
+        }
+        Ok(_) => return Ok(invalid_token()),
+        Err(error) => return Ok(error_response("Erreur lors du refresh token", error)),
+    };
+
+    let new_session_id = Uuid::new_v4();
+    let response = match build_login_response(&user, &state, new_session_id) {
         Ok(response) => response,
         Err(error) => {
             return Ok(error_response(
@@ -353,33 +443,143 @@ async fn refresh_handler(
         }
     };
 
+    if let Err(error) = sqlx::query(
+        r#"
+        INSERT INTO auth_sessions (id, family_id, user_id, expires_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(new_session_id)
+    .bind(session.family_id)
+    .bind(user.id)
+    .bind(refresh_expiry(&state))
+    .execute(&mut *transaction)
+    .await
+    {
+        return Ok(error_response(
+            "Erreur lors de la rotation de session",
+            error,
+        ));
+    }
+
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE auth_sessions
+        SET revoked_at = NOW(), last_used_at = NOW(), replaced_by = $2
+        WHERE id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(session_id)
+    .bind(new_session_id)
+    .execute(&mut *transaction)
+    .await
+    {
+        return Ok(error_response(
+            "Erreur lors de la rotation de session",
+            error,
+        ));
+    }
+
+    if let Err(error) = transaction.commit().await {
+        return Ok(error_response(
+            "Erreur lors de la rotation de session",
+            error,
+        ));
+    }
+
     Ok(warp::reply::with_status(
         warp::reply::json(&response),
         warp::http::StatusCode::OK,
     ))
 }
 
+async fn logout_handler(request: RefreshRequest, state: AppState) -> Result<impl Reply, Rejection> {
+    let claims = match decode_token(&request.refresh_token, "refresh", &state) {
+        Ok(claims) => claims,
+        Err(response) => return Ok(response),
+    };
+
+    let (session_id, user_id) = match (Uuid::parse_str(&claims.jti), Uuid::parse_str(&claims.sub)) {
+        (Ok(session_id), Ok(user_id)) => (session_id, user_id),
+        _ => return Ok(invalid_token()),
+    };
+
+    if let Err(error) = sqlx::query(
+        r#"
+        UPDATE auth_sessions
+        SET revoked_at = COALESCE(revoked_at, NOW())
+        WHERE family_id = (
+            SELECT family_id FROM auth_sessions WHERE id = $1 AND user_id = $2
+        )
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .execute(&state.db.pool)
+    .await
+    {
+        return Ok(error_response("Erreur lors de la déconnexion", error));
+    }
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": true,
+            "message": "Déconnexion effectuée"
+        })),
+        warp::http::StatusCode::OK,
+    ))
+}
+
+async fn issue_login_response(
+    user: &User,
+    state: &AppState,
+) -> Result<LoginResponse, TokenIssueError> {
+    let session_id = Uuid::new_v4();
+    let response = build_login_response(user, state, session_id)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO auth_sessions (id, family_id, user_id, expires_at)
+        VALUES ($1, $1, $2, $3)
+        "#,
+    )
+    .bind(session_id)
+    .bind(user.id)
+    .bind(refresh_expiry(state))
+    .execute(&state.db.pool)
+    .await?;
+
+    Ok(response)
+}
+
 fn build_login_response(
     user: &User,
     state: &AppState,
+    session_id: Uuid,
 ) -> Result<LoginResponse, jsonwebtoken::errors::Error> {
     let access_token = encode_token(
         user,
         "access",
         state.config.jwt_expiration_hours,
         &state.config.jwt_secret,
+        session_id,
     )?;
     let refresh_token = encode_token(
         user,
         "refresh",
-        state.config.jwt_expiration_hours * 24,
+        refresh_validity_hours(state),
         &state.config.jwt_secret,
+        session_id,
     )?;
 
     Ok(LoginResponse {
         access_token,
         refresh_token,
-        expires_in: (state.config.jwt_expiration_hours * 3600) as i64,
+        expires_in: state
+            .config
+            .jwt_expiration_hours
+            .saturating_mul(3600)
+            .min(i64::MAX as u64) as i64,
         user: UserProfile {
             id: user.id,
             email: user.email.clone(),
@@ -396,15 +596,18 @@ fn encode_token(
     token_type: &str,
     validity_hours: u64,
     jwt_secret: &str,
+    session_id: Uuid,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
     let claims = TokenClaims {
         sub: user.id.to_string(),
+        jti: session_id.to_string(),
         producer_id: user.producer_id.to_string(),
         role: user.role.clone(),
         token_type: token_type.to_string(),
         iat: now.timestamp() as usize,
-        exp: (now + Duration::hours(validity_hours as i64)).timestamp() as usize,
+        exp: (now + Duration::hours(validity_hours.min(i64::MAX as u64) as i64)).timestamp()
+            as usize,
     };
 
     encode(
@@ -412,6 +615,31 @@ fn encode_token(
         &claims,
         &EncodingKey::from_secret(jwt_secret.as_bytes()),
     )
+}
+
+fn refresh_expiry(state: &AppState) -> DateTime<Utc> {
+    Utc::now() + Duration::hours(refresh_validity_hours(state) as i64)
+}
+
+fn refresh_validity_hours(state: &AppState) -> u64 {
+    state
+        .config
+        .jwt_expiration_hours
+        .saturating_mul(24)
+        .min(i64::MAX as u64)
+}
+
+async fn revoke_session_family(
+    family_id: Uuid,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE family_id = $1",
+    )
+    .bind(family_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn decode_token(
@@ -527,6 +755,10 @@ fn auth_error(
     )
 }
 
+fn invalid_token() -> warp::reply::WithStatus<warp::reply::Json> {
+    auth_error("Token invalide", warp::http::StatusCode::UNAUTHORIZED)
+}
+
 fn error_response<E: std::fmt::Display>(
     message: &str,
     error: E,
@@ -584,8 +816,10 @@ mod tests {
 
     #[test]
     fn access_decoder_rejects_a_refresh_token() {
+        let session_id = uuid::Uuid::new_v4();
         let claims = TokenClaims {
             sub: uuid::Uuid::new_v4().to_string(),
+            jti: session_id.to_string(),
             producer_id: uuid::Uuid::new_v4().to_string(),
             role: "admin".to_string(),
             token_type: "refresh".to_string(),
@@ -600,5 +834,8 @@ mod tests {
         .expect("encode test token");
 
         assert!(decode_claims(&token, "access", "test-secret").is_err());
+        let decoded = decode_claims(&token, "refresh", "test-secret")
+            .expect("decode refresh token with session id");
+        assert_eq!(decoded.jti, session_id.to_string());
     }
 }

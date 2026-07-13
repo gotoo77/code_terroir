@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use uuid::Uuid;
 use warp::{Filter, Rejection, Reply};
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("producers"));

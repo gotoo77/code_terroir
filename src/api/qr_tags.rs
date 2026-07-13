@@ -20,7 +20,7 @@ struct QRAnalyticsRow {
     scans_this_month: Option<i64>,
 }
 
-pub fn routes(state: AppState) -> impl Filter<Extract = impl Reply, Error = Rejection> + Clone {
+pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let api_prefix = warp::path("api")
         .and(warp::path("v1"))
         .and(warp::path("qr"));
