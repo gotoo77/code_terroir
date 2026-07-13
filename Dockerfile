@@ -1,5 +1,5 @@
 # Build stage
-FROM rustlang/rust:nightly-slim AS builder
+FROM rust:1.90.0-slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -25,7 +25,7 @@ COPY src ./src
 COPY migrations ./migrations
 
 # Build the application
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim

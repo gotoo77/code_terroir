@@ -7,7 +7,7 @@ import socketserver
 import sys
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
 BASE_DIR = Path(__file__).parent
@@ -17,7 +17,10 @@ PORT = 8081
 
 os.chdir(WEB_DIR)
 
-env = Environment(loader=FileSystemLoader(WEB_DIR))
+env = Environment(
+    loader=FileSystemLoader(WEB_DIR),
+    autoescape=select_autoescape(enabled_extensions=("html", "xml")),
+)
 
 
 def get_template_context():

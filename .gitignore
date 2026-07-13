@@ -59,6 +59,8 @@ package-lock.json
 
 # Ignore Python virtual envs if any
 venv/
+.venv/
+.venv-ci/
 .virtualenv/
 .pytest_cache/
 __pycache__/
