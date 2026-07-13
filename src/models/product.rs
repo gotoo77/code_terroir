@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::config::ReferenceData;
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Product {
     pub id: Uuid,
@@ -141,39 +143,6 @@ pub struct CreateProductIngredientLink {
     pub sort_order: Option<i32>,
 }
 
-#[allow(dead_code)]
-// Catégories de produits prédéfinies
-pub const PRODUCT_CATEGORIES: &[&str] = &[
-    "conserve",
-    "confiture",
-    "legume_appertise",
-    "sauce",
-    "condiment",
-    "charcuterie",
-    "fromage",
-    "boisson",
-    "boulangerie",
-    "patisserie",
-    "autre",
-];
-
-pub const EU_ALLERGENS: &[&str] = &[
-    "gluten",
-    "crustaces",
-    "oeufs",
-    "poissons",
-    "arachides",
-    "soja",
-    "lait",
-    "fruits-a-coque",
-    "celeri",
-    "moutarde",
-    "sesame",
-    "sulfites",
-    "lupin",
-    "mollusques",
-];
-
 pub fn normalize_nutriscore(input: Option<&str>) -> Option<String> {
     input
         .map(str::trim)
@@ -182,12 +151,15 @@ pub fn normalize_nutriscore(input: Option<&str>) -> Option<String> {
         .filter(|value| matches!(value.as_str(), "A" | "B" | "C" | "D" | "E"))
 }
 
-pub fn normalize_allergens(allergens: Option<Vec<String>>) -> Vec<String> {
+pub fn normalize_allergens(
+    allergens: Option<Vec<String>>,
+    reference_data: &ReferenceData,
+) -> Vec<String> {
     let mut normalized = Vec::new();
     for allergen in allergens.unwrap_or_default() {
         let value = allergen.trim().to_ascii_lowercase();
         if value.is_empty()
-            || !EU_ALLERGENS.contains(&value.as_str())
+            || !reference_data.contains_allergen(&value)
             || normalized.iter().any(|existing| existing == &value)
         {
             continue;
@@ -200,6 +172,7 @@ pub fn normalize_allergens(allergens: Option<Vec<String>>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{normalize_allergens, normalize_nutriscore};
+    use crate::config::ReferenceData;
 
     #[test]
     fn normalize_nutriscore_accepts_letters_a_to_e() {
@@ -210,12 +183,16 @@ mod tests {
 
     #[test]
     fn normalize_allergens_deduplicates_and_lowercases() {
-        let allergens = normalize_allergens(Some(vec![
-            String::from("Gluten"),
-            String::from(" gluten "),
-            String::from("Lait"),
-            String::from(""),
-        ]));
+        let reference_data = ReferenceData::load(None).expect("reference data");
+        let allergens = normalize_allergens(
+            Some(vec![
+                String::from("Gluten"),
+                String::from(" gluten "),
+                String::from("Lait"),
+                String::from(""),
+            ]),
+            &reference_data,
+        );
 
         assert_eq!(
             allergens,

@@ -76,7 +76,7 @@ Dans un second terminal :
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python serve_gui.py
+python web/server.py
 ```
 
 Adresses locales :
@@ -89,13 +89,16 @@ Adresses locales :
 Le script `./admin.sh start` peut également lancer l'API et l'interface après le démarrage de
 PostgreSQL et Redis.
 
+L'organisation des répertoires et les règles de configuration sont documentées dans
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ## Vérifications
 
 ```bash
 cargo fmt --all -- --check
 cargo test --locked
-./scripts/check-clippy-baseline.sh
-./scripts/check-html.sh
+./scripts/checks/clippy.sh
+./scripts/checks/html.sh
 docker compose config --quiet
 docker build -t code-terroir .
 ```
@@ -114,6 +117,19 @@ Les variables sont documentées dans [.env.example](.env.example). Les plus impo
 - `CORS_ALLOWED_ORIGINS`, liste d'origines autorisées séparées par des virgules ;
 - `QR_BASE_URL` et `BASE_URL` ;
 - `POSTGRES_PASSWORD` et `GRAFANA_ADMIN_PASSWORD`.
+
+Les allergènes réglementaires, catégories métier et unités sont centralisés dans
+[`config/reference-data.json`](config/reference-data.json). L'application embarque ce référentiel
+par défaut. `REFERENCE_DATA_PATH` permet de charger un autre fichier validé au démarrage, sans
+permettre de retirer les 14 allergènes obligatoires du profil européen.
+
+Les commandes de développement sont regroupées sous `scripts/` :
+
+- `./scripts/dev.sh start` lance l'API et l'interface ;
+- `./scripts/seed-demo.sh` charge les données de démonstration ;
+- `./scripts/install-deps.sh` prépare une machine de développement.
+
+`./admin.sh` reste un raccourci compatible vers `scripts/dev.sh`.
 
 Les secrets doivent être fournis par l'environnement en production, jamais intégrés à une image
 ou au dépôt. L'inscription publique est désactivée après le premier compte et le rôle de ce compte

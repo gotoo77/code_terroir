@@ -39,7 +39,6 @@ sha2 = "0.10"
 qrcode = "0.14"
 
 # Configuration
-config = "0.14"
 dotenv = "0.15"
 
 # Logging

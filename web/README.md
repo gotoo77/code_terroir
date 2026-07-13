@@ -14,13 +14,13 @@ The API server will start on `http://localhost:3030`
 ### 2. Start the GUI server (in another terminal):
 ```bash
 cd /path/to/code_terroir_warp
-python3 serve_gui.py
+python3 web/server.py
 ```
-The GUI will be available at `http://localhost:8080`
+The GUI will be available at `http://localhost:8081`
 
 ### 3. Open your browser and navigate to:
 ```
-http://localhost:8080
+http://localhost:8081
 ```
 
 ## Features
@@ -81,4 +81,4 @@ The GUI server includes CORS headers, but if you encounter issues:
 - Try accessing http://localhost:3030/health directly
 
 ### Port Already in Use
-If port 8080 is already in use, modify the `PORT` variable in `serve_gui.py`
+If port 8081 is already in use, set `GUI_PORT` before starting `web/server.py`.

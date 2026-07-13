@@ -2,6 +2,7 @@
 """Serve the local GUI used to exercise the Code Terroir API."""
 
 import http.server
+import json
 import os
 import socketserver
 import sys
@@ -10,10 +11,68 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = BASE_DIR / "web" / "gui"
-HOST = "localhost"
-PORT = 8081
+HOST = os.environ.get("GUI_HOST", "localhost")
+PORT = int(os.environ.get("GUI_PORT", "8081"))
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:3030").rstrip("/")
+REQUIRED_EU_ALLERGENS = {
+    "gluten",
+    "crustaces",
+    "oeufs",
+    "poissons",
+    "arachides",
+    "soja",
+    "lait",
+    "fruits-a-coque",
+    "celeri",
+    "moutarde",
+    "sesame",
+    "sulfites",
+    "lupin",
+    "mollusques",
+}
+
+
+def load_reference_data():
+    """Load and minimally validate the shared business reference data."""
+    configured_path = os.environ.get("REFERENCE_DATA_PATH")
+    path = Path(configured_path).expanduser() if configured_path else BASE_DIR / "config" / "reference-data.json"
+    if not path.is_absolute():
+        path = BASE_DIR / path
+
+    with path.open(encoding="utf-8") as reference_file:
+        data = json.load(reference_file)
+
+    required_sections = {
+        "regulatory_profile",
+        "allergens",
+        "product_categories",
+        "ingredient_categories",
+        "units",
+    }
+    missing = required_sections.difference(data)
+    if missing:
+        raise ValueError(f"Référentiel incomplet, sections manquantes: {sorted(missing)}")
+
+    allergen_ids = [allergen.get("id") for allergen in data["allergens"]]
+    if len(allergen_ids) != len(set(allergen_ids)) or None in allergen_ids:
+        raise ValueError("Les identifiants d'allergènes doivent être présents et uniques")
+    if data["regulatory_profile"] == "eu-1169-2011":
+        missing_allergens = REQUIRED_EU_ALLERGENS.difference(allergen_ids)
+        if missing_allergens:
+            raise ValueError(
+                "Le profil européen exige les allergènes suivants: "
+                f"{sorted(missing_allergens)}"
+            )
+    return data
+
+
+REFERENCE_DATA = load_reference_data()
+ALLERGEN_OPTIONS = [
+    {"value": allergen["id"], "label": allergen["label"]}
+    for allergen in REFERENCE_DATA["allergens"]
+]
 
 os.chdir(WEB_DIR)
 
@@ -29,7 +88,7 @@ def get_template_context():
         "title": "Code Terroir API - Interface de Test",
         "header_title": "🥩 Code Terroir API",
         "header_subtitle": "Apothicaire Culinaire · interface de test pour la tracabilite artisanale",
-        "api_base": f"http://{HOST}:3030",
+        "api_base": API_BASE_URL,
         "tabs": {
             "health": "🏥 Health",
             "auth": "🔐 Auth",
@@ -121,19 +180,7 @@ def get_template_context():
                 "photo_url": "https://example.com/photo-atelier.jpg",
                 "categorie_principale": "legumes",
             },
-            "categories": [
-                "legumes",
-                "fruits",
-                "assaisonnement",
-                "epices",
-                "sel",
-                "poivres",
-                "paprika",
-                "viandes",
-                "poissons",
-                "laitages",
-                "autre",
-            ],
+            "categories": REFERENCE_DATA["ingredient_categories"],
         },
         "products": {
             "title": "Produits",
@@ -171,37 +218,10 @@ def get_template_context():
                 "usage": "Comment utiliser/servir le produit...",
                 "legal": "Mentions legales, allergenes, etc...",
             },
-            "categories": [
-                "conserve",
-                "confiture",
-                "legume_appertise",
-                "sauce",
-                "condiment",
-                "charcuterie",
-                "fromage",
-                "boisson",
-                "boulangerie",
-                "patisserie",
-                "autre",
-            ],
+            "categories": REFERENCE_DATA["product_categories"],
             "quick_fill": "🚀 Test rapide:",
             "nutriscores": ["A", "B", "C", "D", "E"],
-            "allergen_options": [
-                {"value": "gluten", "label": "Cereales contenant du gluten"},
-                {"value": "crustaces", "label": "Crustaces"},
-                {"value": "oeufs", "label": "Oeufs"},
-                {"value": "poissons", "label": "Poissons"},
-                {"value": "arachides", "label": "Arachides"},
-                {"value": "soja", "label": "Soja"},
-                {"value": "lait", "label": "Lait"},
-                {"value": "fruits-a-coque", "label": "Fruits a coque"},
-                {"value": "celeri", "label": "Celeri"},
-                {"value": "moutarde", "label": "Moutarde"},
-                {"value": "sesame", "label": "Graines de sesame"},
-                {"value": "sulfites", "label": "Sulfites"},
-                {"value": "lupin", "label": "Lupin"},
-                {"value": "mollusques", "label": "Mollusques"},
-            ],
+            "allergen_options": ALLERGEN_OPTIONS,
             "example_product": {
                 "producer_id": "550e8400-e29b-41d4-a716-446655440001",
                 "name": "Veloute des Maraichers",
@@ -347,35 +367,8 @@ def get_template_context():
                 "nutrition": 'ex: {"energie_kcal": 35, "per_100g": true}',
                 "documents": "ex: https://.../fiche-technique.pdf",
             },
-            "categories": [
-                "legumes",
-                "fruits",
-                "assaisonnement",
-                "epices",
-                "sel",
-                "poivres",
-                "paprika",
-                "viandes",
-                "poissons",
-                "laitages",
-                "autre",
-            ],
-            "allergen_options": [
-                {"value": "gluten", "label": "Cereales contenant du gluten"},
-                {"value": "crustaces", "label": "Crustaces"},
-                {"value": "oeufs", "label": "Oeufs"},
-                {"value": "poissons", "label": "Poissons"},
-                {"value": "arachides", "label": "Arachides"},
-                {"value": "soja", "label": "Soja"},
-                {"value": "lait", "label": "Lait"},
-                {"value": "fruits-a-coque", "label": "Fruits a coque"},
-                {"value": "celeri", "label": "Celeri"},
-                {"value": "moutarde", "label": "Moutarde"},
-                {"value": "sesame", "label": "Graines de sesame"},
-                {"value": "sulfites", "label": "Sulfites"},
-                {"value": "lupin", "label": "Lupin"},
-                {"value": "mollusques", "label": "Mollusques"},
-            ],
+            "categories": REFERENCE_DATA["ingredient_categories"],
+            "allergen_options": ALLERGEN_OPTIONS,
             "example_ingredient": {
                 "producer_id": "550e8400-e29b-41d4-a716-446655440001",
                 "supplier_id": "550e8400-e29b-41d4-a716-446655440010",
@@ -544,11 +537,11 @@ class CORSHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     try:
-        with ReusableTCPServer(("", PORT), CORSHTTPRequestHandler) as httpd:
+        with ReusableTCPServer((HOST, PORT), CORSHTTPRequestHandler) as httpd:
             print("Code Terroir API Tester GUI")
             print(f"http://{HOST}:{PORT}")
             print(f"Serving from: {WEB_DIR}")
-            print(f"API Base: http://{HOST}:3030")
+            print(f"API Base: {API_BASE_URL}")
             httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nServer stopped")

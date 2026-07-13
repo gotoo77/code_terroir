@@ -67,10 +67,11 @@ services:
   # Monitoring - Prometheus (optional for dev)
   prometheus:
     image: prom/prometheus:latest
+    profiles: ["monitoring"]
     ports:
       - "9090:9090"
     volumes:
-      - ./ops/docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -82,6 +83,7 @@ services:
   # Monitoring - Grafana (optional for dev)
   grafana:
     image: grafana/grafana:latest
+    profiles: ["monitoring"]
     ports:
       - "3000:3000"
     environment:

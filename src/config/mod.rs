@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::path::PathBuf;
+
+mod reference_data;
+
+pub use reference_data::ReferenceData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -17,6 +22,7 @@ pub struct AppConfig {
     pub public_port: u16,    // Port pour les endpoints publics
     pub smtp: SmtpConfig,
     pub security: SecurityConfig,
+    pub reference_data: ReferenceData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +139,14 @@ impl AppConfig {
             },
 
             security: SecurityConfig::load()?,
+
+            reference_data: ReferenceData::load(
+                env::var("REFERENCE_DATA_PATH")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(PathBuf::from)
+                    .as_deref(),
+            )?,
         };
 
         // Créer les répertoires s'ils n'existent pas

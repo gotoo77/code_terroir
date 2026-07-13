@@ -13,7 +13,6 @@ pub mod catalog;
 pub mod ingredients;
 pub mod producers;
 pub mod products;
-// pub mod qr;  // Obsolète - remplacé par qr_tags
 pub mod public;
 pub mod qa_checks;
 pub mod qr_tags;
@@ -47,7 +46,6 @@ pub fn routes(state: AppState) -> impl Filter<Extract = (impl Reply,), Error = R
     let qa_check_routes = qa_checks::routes(state.clone()).boxed();
     let recipe_routes = recipes::routes(state.clone()).boxed();
     let batch_routes = batches::routes(state.clone()).boxed();
-    // let qr_routes = qr::routes(state.clone());  // Obsolète
     let qr_tag_routes = qr_tags::routes(state.clone()).boxed();
     let public_routes = public::routes(state.clone()).boxed();
 

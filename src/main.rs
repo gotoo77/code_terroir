@@ -4,15 +4,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use warp::Filter;
 
 mod api;
-mod auth;
 mod config;
 mod database;
 mod logging;
 mod models;
-mod pdf;
-mod qr;
-mod services;
-mod utils;
 use gwl_logger::{Logger, LoggerConfig};
 use logging::TracingToGwlLayer;
 

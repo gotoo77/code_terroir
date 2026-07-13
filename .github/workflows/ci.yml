@@ -39,10 +39,10 @@ jobs:
         run: cargo test --locked
 
       - name: Reject Clippy warnings
-        run: ./scripts/check-clippy-baseline.sh
+        run: ./scripts/checks/clippy.sh
 
       - name: Validate rendered HTML
-        run: ./scripts/check-html.sh
+        run: ./scripts/checks/html.sh
 
       - name: Scan Git history for secrets
         env:

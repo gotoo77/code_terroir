@@ -1,0 +1,46 @@
+{
+  "regulatory_profile": "eu-1169-2011",
+  "allergens": [
+    { "id": "gluten", "label": "Céréales contenant du gluten" },
+    { "id": "crustaces", "label": "Crustacés" },
+    { "id": "oeufs", "label": "Œufs" },
+    { "id": "poissons", "label": "Poissons" },
+    { "id": "arachides", "label": "Arachides" },
+    { "id": "soja", "label": "Soja" },
+    { "id": "lait", "label": "Lait" },
+    { "id": "fruits-a-coque", "label": "Fruits à coque" },
+    { "id": "celeri", "label": "Céleri" },
+    { "id": "moutarde", "label": "Moutarde" },
+    { "id": "sesame", "label": "Graines de sésame" },
+    { "id": "sulfites", "label": "Anhydride sulfureux et sulfites" },
+    { "id": "lupin", "label": "Lupin" },
+    { "id": "mollusques", "label": "Mollusques" }
+  ],
+  "product_categories": [
+    "conserve",
+    "confiture",
+    "legume_appertise",
+    "sauce",
+    "condiment",
+    "charcuterie",
+    "fromage",
+    "boisson",
+    "boulangerie",
+    "patisserie",
+    "autre"
+  ],
+  "ingredient_categories": [
+    "legumes",
+    "fruits",
+    "assaisonnement",
+    "epices",
+    "sel",
+    "poivres",
+    "paprika",
+    "viandes",
+    "poissons",
+    "laitages",
+    "autre"
+  ],
+  "units": ["g", "kg", "ml", "l", "%", "unite"]
+}

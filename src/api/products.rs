@@ -160,6 +160,13 @@ async fn create_product_handler(
     {
         return Ok(forbidden());
     }
+    if !state
+        .config
+        .reference_data
+        .contains_product_category(&create_request.category)
+    {
+        return Ok(bad_request("Catégorie de produit inconnue"));
+    }
     let product_id = Uuid::new_v4();
     let producer_id = authenticated.producer_id;
 
@@ -181,7 +188,10 @@ async fn create_product_handler(
         .nutritional_values
         .as_ref()
         .and_then(|nutr| serde_json::to_value(nutr).ok());
-    let allergenes = normalize_allergens(create_request.allergenes.clone());
+    let allergenes = normalize_allergens(
+        create_request.allergenes.clone(),
+        &state.config.reference_data,
+    );
     let nutriscore = normalize_nutriscore(create_request.nutriscore.as_deref());
 
     let product = match sqlx::query_as::<_, Product>(
@@ -280,6 +290,14 @@ async fn update_product_handler(
     {
         return Ok(forbidden());
     }
+    if update_request.category.as_deref().is_some_and(|category| {
+        !state
+            .config
+            .reference_data
+            .contains_product_category(category)
+    }) {
+        return Ok(bad_request("Catégorie de produit inconnue"));
+    }
     let product_id = match parse_uuid(&id, "ID produit invalide") {
         Ok(uuid) => uuid,
         Err(response) => return Ok(response),
@@ -306,8 +324,7 @@ async fn update_product_handler(
     let allergenes = update_request
         .allergenes
         .clone()
-        .map(Some)
-        .map(normalize_allergens);
+        .map(|allergens| normalize_allergens(Some(allergens), &state.config.reference_data));
     let nutriscore = update_request
         .nutriscore
         .as_deref()
@@ -570,6 +587,16 @@ fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
             "error": "Action non autorisée"
         })),
         warp::http::StatusCode::FORBIDDEN,
+    )
+}
+
+fn bad_request(error: &str) -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": error
+        })),
+        warp::http::StatusCode::BAD_REQUEST,
     )
 }
 

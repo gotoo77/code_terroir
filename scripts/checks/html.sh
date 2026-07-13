@@ -18,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 serve_gui.py >"$tmp_dir/server.log" 2>&1 &
+python3 web/server.py >"$tmp_dir/server.log" 2>&1 &
 server_pid="$!"
 
 for _ in {1..10}; do

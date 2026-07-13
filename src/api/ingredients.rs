@@ -1,6 +1,7 @@
 use crate::api::auth::AuthenticatedUser;
 use crate::api::{auth, AppState};
 use crate::models::ingredient::{CreateIngredientRequest, Ingredient, UpdateIngredientRequest};
+use crate::models::product::normalize_allergens;
 use crate::models::user::UserRole;
 use std::convert::Infallible;
 use uuid::Uuid;
@@ -154,6 +155,14 @@ async fn create_ingredient_handler(
     if !can_write(&authenticated.role) || create_request.producer_id != authenticated.producer_id {
         return Ok(forbidden());
     }
+    if create_request.category.as_deref().is_some_and(|category| {
+        !state
+            .config
+            .reference_data
+            .contains_ingredient_category(category)
+    }) {
+        return Ok(bad_request("Catégorie d'ingrédient inconnue"));
+    }
 
     if let Some(supplier_id) = create_request.supplier_id {
         if let Err(response) =
@@ -164,6 +173,7 @@ async fn create_ingredient_handler(
     }
 
     let ingredient_id = Uuid::new_v4();
+    let allergens = normalize_allergens(create_request.allergens, &state.config.reference_data);
     match sqlx::query_as::<_, Ingredient>(
         r#"
         INSERT INTO ingredients (
@@ -177,7 +187,7 @@ async fn create_ingredient_handler(
     .bind(authenticated.producer_id)
     .bind(create_request.name)
     .bind(create_request.category)
-    .bind(create_request.allergens.unwrap_or_default())
+    .bind(allergens)
     .bind(create_request.nutritional_info)
     .bind(create_request.supplier_id)
     .bind(create_request.documents.unwrap_or_default())
@@ -215,6 +225,14 @@ async fn update_ingredient_handler(
     if !can_write(&authenticated.role) {
         return Ok(forbidden());
     }
+    if update_request.category.as_deref().is_some_and(|category| {
+        !state
+            .config
+            .reference_data
+            .contains_ingredient_category(category)
+    }) {
+        return Ok(bad_request("Catégorie d'ingrédient inconnue"));
+    }
     let ingredient_id = match Uuid::parse_str(&id) {
         Ok(uuid) => uuid,
         Err(_) => {
@@ -237,6 +255,10 @@ async fn update_ingredient_handler(
         }
     }
 
+    let allergens = update_request
+        .allergens
+        .map(|allergens| normalize_allergens(Some(allergens), &state.config.reference_data));
+
     match sqlx::query_as::<_, Ingredient>(
         r#"
         UPDATE ingredients
@@ -255,7 +277,7 @@ async fn update_ingredient_handler(
     .bind(ingredient_id)
     .bind(update_request.name)
     .bind(update_request.category)
-    .bind(update_request.allergens)
+    .bind(allergens)
     .bind(update_request.nutritional_info)
     .bind(update_request.supplier_id)
     .bind(update_request.documents)
@@ -343,5 +365,15 @@ fn forbidden() -> warp::reply::WithStatus<warp::reply::Json> {
             "error": "Action non autorisée"
         })),
         warp::http::StatusCode::FORBIDDEN,
+    )
+}
+
+fn bad_request(error: &str) -> warp::reply::WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({
+            "success": false,
+            "error": error
+        })),
+        warp::http::StatusCode::BAD_REQUEST,
     )
 }
