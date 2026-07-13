@@ -18,12 +18,6 @@
 # Log files and runtime artifacts
 *.log
 
-# Old HTML files (moved to web/gui/)
-/index.html
-/index_backup.html
-/web/index.html
-/web/index_backup.html
-!/web/gui/
 logs/
 *.pid
 *.tmp
